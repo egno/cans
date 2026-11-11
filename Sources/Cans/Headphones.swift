@@ -28,7 +28,15 @@ final class Headphones {
     private(set) var eq: [EQBand] = []
     private(set) var autoPause: Bool?
     private(set) var autoAnswer: Bool?
+    private(set) var multipoint: Bool?
     private(set) var lastError: String?
+
+    /// At or below this the battery shows in red and a notification is posted.
+    static let lowBattery = BatteryAlerts.thresholds.max()!
+
+    var isBatteryLow: Bool {
+        battery.map { $0 <= Self.lowBattery } ?? false
+    }
 
     var currentModeSlot: ModeSlot? {
         modes.first { $0.index == currentMode }
@@ -55,21 +63,33 @@ final class Headphones {
         didSet { UserDefaults.standard.set(announceModeChanges, forKey: Keys.announce) }
     }
 
+    var lowBatteryAlerts: Bool {
+        didSet {
+            UserDefaults.standard.set(lowBatteryAlerts, forKey: Keys.lowBatteryAlerts)
+            if lowBatteryAlerts { batteryAlerts.requestAuthorization() }
+        }
+    }
+
     @ObservationIgnored private var client: BMAPClient?
     @ObservationIgnored private var connectTask: Task<Void, Never>?
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var isConnecting = false
     @ObservationIgnored private var observers = Observers()
+    @ObservationIgnored private let batteryAlerts = BatteryAlerts()
+    @ObservationIgnored private var errorDismissTask: Task<Void, Never>?
 
     private enum Keys {
         static let address = "lastDeviceAddress"
         static let announce = "announceModeChanges"
         static let hide = "hideWhenDisconnected"
+        static let lowBatteryAlerts = "lowBatteryAlerts"
     }
 
     init() {
         announceModeChanges = UserDefaults.standard.object(forKey: Keys.announce) as? Bool ?? true
         hideWhenDisconnected = UserDefaults.standard.bool(forKey: Keys.hide)
+        lowBatteryAlerts = UserDefaults.standard.object(forKey: Keys.lowBatteryAlerts) as? Bool ?? true
+        if lowBatteryAlerts { batteryAlerts.requestAuthorization() }
         observers.install { [weak self] in self?.reconnectSoon() }
         reconnectSoon()
     }
@@ -81,25 +101,34 @@ final class Headphones {
         currentMode = index
         Task {
             do {
-                let reply = try await send(Request.setMode(index, announce: announceModeChanges))
+                let reply = try await send(Request.setMode(index, announce: announceModeChanges),
+                                           failing: "switch mode")
                 if let idx = reply.payload.first { currentMode = idx }
             } catch {
                 currentMode = previous
-                report(error)
             }
         }
     }
 
     func setEQ(_ band: EQBand.Kind, value: Int) {
-        Task { try? await send(Request.setEQ(band, value: value)) }
+        Task { try? await send(Request.setEQ(band, value: value), failing: "change the equalizer") }
     }
 
     func setAutoPause(_ on: Bool) {
-        Task { try? await send(Request.setToggle(.autoPause, on)) }
+        Task { try? await send(Request.setToggle(.autoPause, on), failing: "change auto-pause") }
     }
 
     func setAutoAnswer(_ on: Bool) {
-        Task { try? await send(Request.setToggle(.autoAnswer, on)) }
+        Task { try? await send(Request.setToggle(.autoAnswer, on), failing: "change auto-answer") }
+    }
+
+    func setMultipoint(_ on: Bool) {
+        Task { try? await send(Request.setToggle(.multipoint, on), failing: "change multipoint") }
+    }
+
+    func dismissError() {
+        errorDismissTask?.cancel()
+        lastError = nil
     }
 
     func refresh() {
@@ -109,14 +138,14 @@ final class Headphones {
     // MARK: - Device I/O
 
     @discardableResult
-    private func send(_ packet: Packet) async throws -> Packet {
-        guard let client else { throw BMAPError.disconnected }
+    private func send(_ packet: Packet, failing action: String) async throws -> Packet {
         do {
+            guard let client else { throw BMAPError.disconnected }
             let reply = try await client.send(packet)
             apply(reply)
             return reply
         } catch {
-            report(error)
+            report(error, action: action)
             throw error
         }
     }
@@ -124,13 +153,16 @@ final class Headphones {
     private func apply(_ p: Packet) {
         guard p.op == .status || p.op == .result else { return }
         switch p.address {
-        case .battery: battery = Decode.battery(p.payload)
+        case .battery:
+            battery = Decode.battery(p.payload)
+            if lowBatteryAlerts, let battery { batteryAlerts.update(battery: battery, deviceName: name) }
         case .productName: name = Decode.productName(p.payload)
         case .firmware: firmware = Decode.string(p.payload)
         case .modelName: model = Decode.string(p.payload)
         case .eq: eq = Decode.eq(p.payload)
         case .autoPause: autoPause = Decode.bool(p.payload)
         case .autoAnswer: autoAnswer = Decode.bool(p.payload)
+        case .multipoint: multipoint = Decode.multipoint(p.payload)
         case .currentMode: if let m = Decode.currentMode(p.payload) { currentMode = m }
         case .modeConfig:
             guard let slot = Decode.modeSlot(p.payload) else { return }
@@ -144,8 +176,20 @@ final class Headphones {
     }
 
     private func refreshAll() async {
-        for address in [Address.productName, .modelName, .firmware, .battery, .eq, .autoPause, .autoAnswer, .currentMode] {
-            _ = try? await client?.send(Request.get(address)).applying(apply)
+        // Name first, so a low-battery notification can use it.
+        var failures: [Error] = []
+        for address in [Address.productName, .modelName, .firmware, .battery, .eq,
+                        .autoPause, .autoAnswer, .multipoint, .currentMode] {
+            guard let client else { return }
+            do {
+                apply(try await client.send(Request.get(address)))
+            } catch {
+                log.error("refresh \(address, privacy: .public): \(String(describing: error), privacy: .public)")
+                failures.append(error)
+            }
+        }
+        if let first = failures.first {
+            report(first, action: failures.count == 1 ? "read a setting" : "read \(failures.count) settings")
         }
         // Slots 0-9: presets then custom; the device errors past the last slot.
         for index in UInt8(0)...9 {
@@ -154,9 +198,32 @@ final class Headphones {
         }
     }
 
-    private func report(_ error: Error) {
-        log.error("\(String(describing: error), privacy: .public)")
-        lastError = String(describing: error)
+    /// Shows "Couldn't <action>: <reason>" in the popover for a few seconds.
+    private func report(_ error: Error, action: String) {
+        log.error("couldn't \(action, privacy: .public): \(String(describing: error), privacy: .public)")
+        lastError = "Couldn't \(action): \(Self.reason(for: error))"
+        errorDismissTask?.cancel()
+        errorDismissTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(8))
+            guard !Task.isCancelled else { return }
+            self?.lastError = nil
+        }
+    }
+
+    private static func reason(for error: Error) -> String {
+        switch error as? BMAPError {
+        case .disconnected: "headphones aren't connected"
+        case .timeout: "headphones didn't respond"
+        case .malformed: "unexpected reply from the headphones"
+        case .device(_, let code):
+            switch code {
+            case .functionNotSupported, .fblockNotSupported, .operatorNotSupported:
+                "not supported by these headphones"
+            case .invalidState, .invalidTransition: "not possible right now"
+            default: "headphones reported an error"
+            }
+        case nil: error.localizedDescription
+        }
     }
 
     // MARK: - Connection
@@ -224,8 +291,11 @@ final class Headphones {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(60))
-                _ = try? await self?.send(Request.get(.battery))
-                _ = try? await self?.send(Request.get(.currentMode))
+                // Background reads stay out of the popover; a dead link shows up as a disconnect.
+                for address in [Address.battery, .currentMode] {
+                    guard let self, let client = self.client else { return }
+                    if let reply = try? await client.send(Request.get(address)) { self.apply(reply) }
+                }
             }
         }
     }
@@ -245,10 +315,6 @@ final class Headphones {
         connectTask?.cancel()
         client?.close()
     }
-}
-
-private extension Packet {
-    func applying(_ f: (Packet) -> Void) -> Packet { f(self); return self }
 }
 
 /// System events that are good moments to retry the connection.

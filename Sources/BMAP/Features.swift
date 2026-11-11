@@ -111,8 +111,8 @@ public enum Decode {
         p.first.map { $0 != 0 }
     }
 
-    /// Multipoint: bit 1 means enabled.
+    /// Multipoint: bit 0 is the setting (0x07 on, 0x06 off); bits 1-2 don't change with it.
     public static func multipoint(_ p: [UInt8]) -> Bool? {
-        p.first.map { $0 & 0x02 != 0 }
+        p.first.map { $0 & 0x01 != 0 }
     }
 }

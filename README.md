@@ -11,10 +11,11 @@ battery, listening modes, equalizer and a few settings, without the phone app.
 
 ## Features
 
-- Battery percentage in the menu bar
+- Battery percentage in the menu bar, red at 20% or below
+- Low battery notifications at 20% and 10%
 - Switch listening modes: Quiet, Aware, Immersion and your custom modes
 - 3-band equalizer (treble / mid / bass, −10…+10)
-- Toggle auto-pause on removal and auto-answer calls
+- Toggle auto-pause on removal, auto-answer calls and multipoint
 - Optional voice announcement on mode change
 - Reconnects automatically: on Bluetooth connect, on wake, and with backoff
 - Launch at login

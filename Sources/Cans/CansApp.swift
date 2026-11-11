@@ -45,10 +45,35 @@ struct MenuBarLabel: View {
         case .connected:
             Image(systemName: "headphones")
             if showBattery, let battery = headphones.battery {
-                Text("\(battery)%")
+                if headphones.isBatteryLow, let red = LowBatteryText.image("\(battery)%") {
+                    Image(nsImage: red)
+                } else {
+                    Text("\(battery)%")
+                }
             }
         case .searching, .unavailable:
             Image(systemName: "headphones.slash")
         }
+    }
+}
+
+/// The menu bar draws its label as a template, which drops colour, so a low
+/// battery is rendered to a non-template image in the menu bar font instead.
+@MainActor
+enum LowBatteryText {
+    static func image(_ text: String) -> NSImage? {
+        let font = NSFont.menuBarFont(ofSize: 0)
+        let attributed = NSAttributedString(string: text, attributes: [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: font.pointSize, weight: .regular),
+            .foregroundColor: NSColor.systemRed,
+        ])
+        let size = attributed.size()
+        let image = NSImage(size: NSSize(width: ceil(size.width), height: ceil(size.height)), flipped: false) { rect in
+            attributed.draw(in: rect)
+            return true
+        }
+        image.isTemplate = false
+        image.accessibilityDescription = "Battery low, \(text)"
+        return image
     }
 }

@@ -23,7 +23,7 @@ struct MenuView: View {
                 // The text column's spacer would otherwise take whatever height the window offers.
                 .fixedSize(horizontal: false, vertical: true)
             if let error = headphones.lastError {
-                Banner(text: error)
+                Banner(text: error) { headphones.dismissError() }
             }
             if headphones.status == .connected {
                 Divider()
@@ -88,7 +88,7 @@ private struct DeviceCard<Accessory: View>: View {
                     .lineLimit(1)
                 Spacer(minLength: 4)
                 if headphones.status == .connected, let battery = headphones.battery {
-                    BatteryLabel(percent: battery)
+                    BatteryLabel(percent: battery, isLow: headphones.isBatteryLow)
                 }
                 accessory()
             }
@@ -120,6 +120,7 @@ private struct DeviceCard<Accessory: View>: View {
 /// "60%" with a battery symbol; red when low.
 private struct BatteryLabel: View {
     let percent: Int
+    let isLow: Bool
 
     var body: some View {
         HStack(spacing: 3) {
@@ -127,7 +128,7 @@ private struct BatteryLabel: View {
             Image(systemName: symbol)
         }
         .font(.caption)
-        .foregroundStyle(percent <= 15 ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+        .foregroundStyle(isLow ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
         .help("Battery \(percent)%")
     }
 
@@ -296,6 +297,7 @@ private struct SettingsMenu: View {
             Toggle("Show battery in menu bar", isOn: $showBatteryInMenuBar)
             Toggle("Hide when disconnected", isOn: $headphones.hideWhenDisconnected)
             Toggle("Announce mode changes", isOn: $headphones.announceModeChanges)
+            Toggle("Low battery alerts", isOn: $headphones.lowBatteryAlerts)
             if let autoPause = headphones.autoPause {
                 Toggle("Pause when taken off", isOn: Binding(
                     get: { autoPause }, set: { headphones.setAutoPause($0) }))
@@ -303,6 +305,10 @@ private struct SettingsMenu: View {
             if let autoAnswer = headphones.autoAnswer {
                 Toggle("Answer calls when put on", isOn: Binding(
                     get: { autoAnswer }, set: { headphones.setAutoAnswer($0) }))
+            }
+            if let multipoint = headphones.multipoint {
+                Toggle("Connect to two devices", isOn: Binding(
+                    get: { multipoint }, set: { headphones.setMultipoint($0) }))
             }
             Divider()
             if headphones.status == .connected {
@@ -333,16 +339,24 @@ private struct SettingsMenu: View {
 /// A full-width strip for problems.
 private struct Banner: View {
     let text: String
+    let dismiss: () -> Void
 
     var body: some View {
-        Label(text, systemImage: "exclamationmark.triangle.fill")
-            .font(.caption)
-            .foregroundStyle(.red)
-            .lineLimit(2)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(RoundedRectangle(cornerRadius: 6).fill(.red.opacity(0.1)))
+        HStack(alignment: .top, spacing: 6) {
+            Label(text, systemImage: "exclamationmark.triangle.fill")
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Button(action: dismiss) {
+                Image(systemName: "xmark").font(.caption2.weight(.semibold))
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss")
+        }
+        .font(.caption)
+        .foregroundStyle(.red)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 6).fill(.red.opacity(0.1)))
     }
 }
 

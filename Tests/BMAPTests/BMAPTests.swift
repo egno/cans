@@ -61,6 +61,7 @@ private func hex(_ s: String) -> [UInt8] {
         #expect(Decode.currentMode([0xff]) == nil)
         #expect(Decode.currentMode([2]) == 2)
         #expect(Decode.multipoint([0x07]) == true)
+        #expect(Decode.multipoint([0x06]) == false)
     }
 }
 
