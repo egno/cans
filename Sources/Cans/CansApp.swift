@@ -29,15 +29,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// One symbol for the connection state, plus the battery level unless turned off in settings.
 struct MenuBarLabel: View {
     let headphones: Headphones
+    @AppStorage(Prefs.showBatteryInMenuBar) private var showBattery = true
 
     var body: some View {
-        if headphones.status == .connected, let battery = headphones.battery {
+        switch headphones.status {
+        case .connected:
             Image(systemName: "headphones")
-            Text("\(battery)%")
-        } else {
-            Image(systemName: "headphones").opacity(0.5)
+            if showBattery, let battery = headphones.battery {
+                Text("\(battery)%")
+            }
+        case .searching, .unavailable:
+            Image(systemName: "headphones.slash")
         }
     }
 }

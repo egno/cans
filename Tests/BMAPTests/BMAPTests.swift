@@ -57,6 +57,7 @@ private func hex(_ s: String) -> [UInt8] {
     @Test func misc() {
         #expect(Decode.productName(hex("0041746f6d")) == "Atom")
         #expect(Decode.string(hex("312e362e372b6736656261626432")) == "1.6.7+g6ebabd2")
+        #expect(Decode.string(hex("426f736520514320556c747261204865616470686f6e6573")) == "Bose QC Ultra Headphones")
         #expect(Decode.currentMode([0xff]) == nil)
         #expect(Decode.currentMode([2]) == 2)
         #expect(Decode.multipoint([0x07]) == true)

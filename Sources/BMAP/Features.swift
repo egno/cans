@@ -4,6 +4,7 @@
 public extension Address {
     static let productID = Address(0, 3)
     static let firmware = Address(0, 5)
+    static let modelName = Address(0, 15)
     static let productName = Address(1, 2)
     static let eq = Address(1, 7)
     static let multipoint = Address(1, 10)

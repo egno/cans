@@ -21,6 +21,7 @@ final class Headphones {
     private(set) var status: Status = .searching
     private(set) var name: String?
     private(set) var firmware: String?
+    private(set) var model: String?
     private(set) var battery: Int?
     private(set) var modes: [ModeSlot] = []
     private(set) var currentMode: UInt8?
@@ -28,6 +29,10 @@ final class Headphones {
     private(set) var autoPause: Bool?
     private(set) var autoAnswer: Bool?
     private(set) var lastError: String?
+
+    var currentModeSlot: ModeSlot? {
+        modes.first { $0.index == currentMode }
+    }
 
     var announceModeChanges: Bool {
         didSet { UserDefaults.standard.set(announceModeChanges, forKey: Keys.announce) }
@@ -103,6 +108,7 @@ final class Headphones {
         case .battery: battery = Decode.battery(p.payload)
         case .productName: name = Decode.productName(p.payload)
         case .firmware: firmware = Decode.string(p.payload)
+        case .modelName: model = Decode.string(p.payload)
         case .eq: eq = Decode.eq(p.payload)
         case .autoPause: autoPause = Decode.bool(p.payload)
         case .autoAnswer: autoAnswer = Decode.bool(p.payload)
@@ -119,7 +125,7 @@ final class Headphones {
     }
 
     private func refreshAll() async {
-        for address in [Address.productName, .firmware, .battery, .eq, .autoPause, .autoAnswer, .currentMode] {
+        for address in [Address.productName, .modelName, .firmware, .battery, .eq, .autoPause, .autoAnswer, .currentMode] {
             _ = try? await client?.send(Request.get(address)).applying(apply)
         }
         // Slots 0-9: presets then custom; the device errors past the last slot.
