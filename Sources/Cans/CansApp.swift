@@ -48,7 +48,8 @@ struct MenuBarLabel: View {
                 if headphones.isBatteryLow, let red = LowBatteryText.image("\(battery)%") {
                     Image(nsImage: red)
                 } else {
-                    Text("\(battery)%")
+                    // Fixed-width digits, so the menu bar item doesn't shift as the level changes.
+                    Text("\(battery)%").monospacedDigit()
                 }
             }
         case .searching, .unavailable:

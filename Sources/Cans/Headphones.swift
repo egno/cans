@@ -32,8 +32,14 @@ final class Headphones {
     /// Devices paired with the headphones, most recently used first.
     private(set) var devices: [DeviceInfo] = []
     /// Devices with a connect or disconnect in flight.
-    private(set) var pendingDevices: Set<DeviceAddress> = []
+    private(set) var pendingDevices: [DeviceAddress: PendingChange] = [:]
     private(set) var lastError: String?
+    /// False until the first full read after connecting, so the popover fills in once instead of row by row.
+    private(set) var isLoaded = false
+    /// Bumped when an EQ write fails, so sliders drop their unsent position.
+    private(set) var eqRevision = 0
+
+    enum PendingChange { case connect, disconnect }
 
     /// At or below this the battery shows in red and a notification is posted.
     static let lowBattery = BatteryAlerts.thresholds.max()!
@@ -50,11 +56,14 @@ final class Headphones {
     var hideWhenDisconnected: Bool {
         didSet {
             UserDefaults.standard.set(hideWhenDisconnected, forKey: Keys.hide)
-            revealed = false
+            // Turned on while disconnected: keep the item until the next connect rather than
+            // pulling the menu out from under the pointer.
+            if hideWhenDisconnected, status != .connected { revealed = true }
         }
     }
 
-    /// Set when the app is opened again while hidden, so settings stay reachable; cleared on connect.
+    /// Set when the app is opened again while hidden, or when hiding is turned on while
+    /// disconnected, so settings stay reachable; cleared on connect.
     private(set) var revealed = false
 
     var isInMenuBar: Bool {
@@ -123,7 +132,13 @@ final class Headphones {
     }
 
     func setEQ(_ band: EQBand.Kind, value: Int) {
-        Task { try? await send(Request.setEQ(band, value: value), failing: "change the equalizer") }
+        Task {
+            do {
+                try await send(Request.setEQ(band, value: value), failing: "change the equalizer")
+            } catch {
+                eqRevision += 1
+            }
+        }
     }
 
     func setAutoPause(_ on: Bool) {
@@ -139,28 +154,53 @@ final class Headphones {
     }
 
     func connect(_ device: DeviceInfo) {
-        changeConnection(of: device, Request.connect(device.address), failing: "connect \(device.name)")
+        changeConnection(of: device, .connect)
     }
 
     func disconnect(_ device: DeviceInfo) {
-        changeConnection(of: device, Request.disconnect(device.address), failing: "disconnect \(device.name)")
+        changeConnection(of: device, .disconnect)
     }
 
     /// The headphones answer PROCESSING at once and RESULT (or ERROR) when done,
     /// which `handleDeviceEvent` picks up. The timeout covers a result that never comes.
-    private func changeConnection(of device: DeviceInfo, _ request: Packet, failing action: String) {
+    private func changeConnection(of device: DeviceInfo, _ change: PendingChange) {
         let address = device.address
-        pendingDevices.insert(address)
+        let request = change == .connect ? Request.connect(address) : Request.disconnect(address)
+        pendingDevices[address] = change
         Task {
             do {
-                try await send(request, failing: action)
+                try await send(request, failing: Self.describe(change, displayName(of: device)))
             } catch {
-                pendingDevices.remove(address)
+                pendingDevices[address] = nil
                 return
             }
             try? await Task.sleep(for: .seconds(20))
-            if pendingDevices.remove(address) != nil { await loadDevices() }
+            if pendingDevices.removeValue(forKey: address) != nil {
+                report(BMAPError.timeout(request.address), action: Self.describe(change, displayName(of: device)))
+                await loadDevices()
+            }
         }
+    }
+
+    func displayName(of device: DeviceInfo) -> String {
+        isThisMac(device) ? "this Mac" : device.name
+    }
+
+    private static func describe(_ change: PendingChange, _ name: String) -> String {
+        "\(change == .connect ? "connect" : "disconnect") \(name)"
+    }
+
+    /// Skips the backoff wait and looks for the headphones now.
+    func retryNow() {
+        guard client == nil, !isConnecting else { return }
+        status = .searching
+        connectTask?.cancel()
+        connectTask = Task { await connectLoop() }
+    }
+
+    /// For problems outside the headphones, such as launch at login.
+    func showProblem(_ message: String) {
+        showError(message)
     }
 
     func refreshDevices() {
@@ -221,13 +261,17 @@ final class Headphones {
     private func handleDeviceEvent(_ p: Packet) {
         switch (p.address, p.op) {
         case (.connectDevice, .result), (.disconnectDevice, .result):
-            if let address = DeviceAddress(p.payload.suffix(6)) { pendingDevices.remove(address) }
+            if let address = DeviceAddress(p.payload.suffix(6)) { pendingDevices[address] = nil }
             scheduleDeviceRefresh()
         case (.connectDevice, .error), (.disconnectDevice, .error):
-            pendingDevices.removeAll()
+            // The error carries no address; name the device when only one change was in flight.
+            let change: PendingChange = p.address == .connectDevice ? .connect : .disconnect
+            let matching = pendingDevices.filter { $0.value == change }.map(\.key)
+            let name = matching.count == 1
+                ? devices.first { $0.address == matching[0] }.map(displayName(of:)) : nil
+            matching.forEach { pendingDevices[$0] = nil }
             let code = p.payload.first.flatMap(DeviceErrorCode.init(rawValue:))
-            report(BMAPError.device(p.address, code),
-                   action: p.address == .connectDevice ? "connect the device" : "disconnect the device")
+            report(BMAPError.device(p.address, code), action: Self.describe(change, name ?? "the device"))
             scheduleDeviceRefresh()
         case (_, .status) where p.address != .deviceInfo && p.address != .pairedDevices:
             scheduleDeviceRefresh()
@@ -277,17 +321,26 @@ final class Headphones {
             report(first, action: failures.count == 1 ? "read a setting" : "read \(failures.count) settings")
         }
         // Slots 0-9: presets then custom; the device errors past the last slot.
+        // Collected first so the list appears in one step.
+        var slots: [ModeSlot] = []
         for index in UInt8(0)...9 {
-            guard let reply = try? await client?.send(Request.get(.modeConfig, [index])) else { break }
-            apply(reply)
+            guard let reply = try? await client?.send(Request.get(.modeConfig, [index])),
+                  let slot = Decode.modeSlot(reply.payload) else { break }
+            if !slot.isEmpty { slots.append(slot) }
         }
+        if client != nil { modes = slots }
         await loadDevices()
+        if client != nil { isLoaded = true }
     }
 
     /// Shows "Couldn't <action>: <reason>" in the popover for a few seconds.
     private func report(_ error: Error, action: String) {
         log.error("couldn't \(action, privacy: .public): \(String(describing: error), privacy: .public)")
-        lastError = "Couldn't \(action): \(Self.reason(for: error))"
+        showError("Couldn't \(action): \(Self.reason(for: error))")
+    }
+
+    private func showError(_ message: String) {
+        lastError = message
         errorDismissTask?.cancel()
         errorDismissTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(8))
@@ -323,7 +376,8 @@ final class Headphones {
     private func connectLoop() async {
         var delay: Duration = .seconds(5)
         while client == nil, !Task.isCancelled {
-            status = .searching
+            // Background retries keep showing "Not connected" instead of flickering to "Connecting…".
+            if status != .unavailable { status = .searching }
             if await connectToAnyCandidate() { return }
             status = .unavailable
             try? await Task.sleep(for: delay)
@@ -393,7 +447,11 @@ final class Headphones {
         battery = nil
         currentMode = nil
         devices = []
-        pendingDevices = []
+        pendingDevices = [:]
+        autoPause = nil
+        autoAnswer = nil
+        multipoint = nil
+        isLoaded = false
         status = .unavailable
         reconnectSoon()
     }
