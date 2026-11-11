@@ -1,3 +1,5 @@
+<img src="Resources/AppIcon.png" width="128" alt="Cans icon" align="right">
+
 # Cans
 
 A small native macOS menu bar app for Bose QuietComfort Ultra headphones:
