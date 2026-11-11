@@ -29,6 +29,10 @@ final class Headphones {
     private(set) var autoPause: Bool?
     private(set) var autoAnswer: Bool?
     private(set) var multipoint: Bool?
+    /// Devices paired with the headphones, most recently used first.
+    private(set) var devices: [DeviceInfo] = []
+    /// Devices with a connect or disconnect in flight.
+    private(set) var pendingDevices: Set<DeviceAddress> = []
     private(set) var lastError: String?
 
     /// At or below this the battery shows in red and a notification is posted.
@@ -77,6 +81,14 @@ final class Headphones {
     @ObservationIgnored private var observers = Observers()
     @ObservationIgnored private let batteryAlerts = BatteryAlerts()
     @ObservationIgnored private var errorDismissTask: Task<Void, Never>?
+    @ObservationIgnored private var deviceRefreshTask: Task<Void, Never>?
+    /// The headphones list this Mac among their devices. macOS formats it "BC:89:C1:59:5B:FB".
+    @ObservationIgnored private let hostAddress = IOBluetoothHostController.default()?.addressAsString()
+        .map { $0.lowercased().filter(\.isHexDigit) }
+
+    func isThisMac(_ device: DeviceInfo) -> Bool {
+        device.address.description.filter(\.isHexDigit) == hostAddress
+    }
 
     private enum Keys {
         static let address = "lastDeviceAddress"
@@ -126,6 +138,35 @@ final class Headphones {
         Task { try? await send(Request.setToggle(.multipoint, on), failing: "change multipoint") }
     }
 
+    func connect(_ device: DeviceInfo) {
+        changeConnection(of: device, Request.connect(device.address), failing: "connect \(device.name)")
+    }
+
+    func disconnect(_ device: DeviceInfo) {
+        changeConnection(of: device, Request.disconnect(device.address), failing: "disconnect \(device.name)")
+    }
+
+    /// The headphones answer PROCESSING at once and RESULT (or ERROR) when done,
+    /// which `handleDeviceEvent` picks up. The timeout covers a result that never comes.
+    private func changeConnection(of device: DeviceInfo, _ request: Packet, failing action: String) {
+        let address = device.address
+        pendingDevices.insert(address)
+        Task {
+            do {
+                try await send(request, failing: action)
+            } catch {
+                pendingDevices.remove(address)
+                return
+            }
+            try? await Task.sleep(for: .seconds(20))
+            if pendingDevices.remove(address) != nil { await loadDevices() }
+        }
+    }
+
+    func refreshDevices() {
+        Task { await loadDevices() }
+    }
+
     func dismissError() {
         errorDismissTask?.cancel()
         lastError = nil
@@ -151,6 +192,7 @@ final class Headphones {
     }
 
     private func apply(_ p: Packet) {
+        if p.address.fblock == Address.pairedDevices.fblock { handleDeviceEvent(p) }
         guard p.op == .status || p.op == .result else { return }
         switch p.address {
         case .battery:
@@ -175,6 +217,49 @@ final class Headphones {
         }
     }
 
+    /// Connection results and device changes the headphones report on their own.
+    private func handleDeviceEvent(_ p: Packet) {
+        switch (p.address, p.op) {
+        case (.connectDevice, .result), (.disconnectDevice, .result):
+            if let address = DeviceAddress(p.payload.suffix(6)) { pendingDevices.remove(address) }
+            scheduleDeviceRefresh()
+        case (.connectDevice, .error), (.disconnectDevice, .error):
+            pendingDevices.removeAll()
+            let code = p.payload.first.flatMap(DeviceErrorCode.init(rawValue:))
+            report(BMAPError.device(p.address, code),
+                   action: p.address == .connectDevice ? "connect the device" : "disconnect the device")
+            scheduleDeviceRefresh()
+        case (_, .status) where p.address != .deviceInfo && p.address != .pairedDevices:
+            scheduleDeviceRefresh()
+        default:
+            break
+        }
+    }
+
+    /// Several device events tend to arrive together; reload the list once.
+    private func scheduleDeviceRefresh() {
+        deviceRefreshTask?.cancel()
+        deviceRefreshTask = Task {
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            await loadDevices()
+        }
+    }
+
+    private func loadDevices() async {
+        guard let client,
+              let reply = try? await client.send(Request.get(.pairedDevices)),
+              let paired = Decode.pairedDevices(reply.payload) else { return }
+        var loaded: [DeviceInfo] = []
+        for address in paired.addresses {
+            if let reply = try? await client.send(Request.deviceInfo(address)),
+               let info = Decode.deviceInfo(reply.payload) {
+                loaded.append(info)
+            }
+        }
+        devices = loaded
+    }
+
     private func refreshAll() async {
         // Name first, so a low-battery notification can use it.
         var failures: [Error] = []
@@ -196,6 +281,7 @@ final class Headphones {
             guard let reply = try? await client?.send(Request.get(.modeConfig, [index])) else { break }
             apply(reply)
         }
+        await loadDevices()
     }
 
     /// Shows "Couldn't <action>: <reason>" in the popover for a few seconds.
@@ -306,6 +392,8 @@ final class Headphones {
         client = nil
         battery = nil
         currentMode = nil
+        devices = []
+        pendingDevices = []
         status = .unavailable
         reconnectSoon()
     }

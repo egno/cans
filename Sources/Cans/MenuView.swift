@@ -11,11 +11,13 @@ extension Color {
 enum Prefs {
     static let showBatteryInMenuBar = "showBatteryInMenuBar"
     static let showEqualizer = "showEqualizer"
+    static let showDevices = "showDevices"
 }
 
 struct MenuView: View {
     @Bindable var headphones: Headphones
     @AppStorage(Prefs.showEqualizer) private var showEqualizer = false
+    @AppStorage(Prefs.showDevices) private var showDevices = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -28,6 +30,15 @@ struct MenuView: View {
             if headphones.status == .connected {
                 Divider()
                 modes
+                if !headphones.devices.isEmpty {
+                    Divider()
+                    VStack(alignment: .leading, spacing: 2) {
+                        SectionToggle(title: "Devices", detail: devicesSummary, isExpanded: $showDevices)
+                        if showDevices {
+                            DeviceList(headphones: headphones)
+                        }
+                    }
+                }
                 if !headphones.eq.isEmpty {
                     Divider()
                     VStack(alignment: .leading, spacing: 4) {
@@ -44,6 +55,13 @@ struct MenuView: View {
         .tint(.cans)
         .animation(.snappy(duration: 0.25), value: headphones.currentMode)
         .animation(.snappy(duration: 0.25), value: headphones.status)
+        .animation(.snappy(duration: 0.25), value: headphones.devices)
+        // The list changes when other devices connect, so catch up whenever the popover opens.
+        .onAppear { if headphones.status == .connected { headphones.refreshDevices() } }
+    }
+
+    private var devicesSummary: String {
+        "\(headphones.devices.filter(\.isConnected).count) connected"
     }
 
     private var modes: some View {
@@ -205,6 +223,111 @@ private extension ModeSlot {
         case "immersion": "Spatial audio"
         default: "Custom mode"
         }
+    }
+}
+
+// MARK: - Devices
+
+/// Paired devices; clicking one connects it, connected ones other than this Mac can be disconnected.
+private struct DeviceList: View {
+    let headphones: Headphones
+
+    var body: some View {
+        ForEach(headphones.devices, id: \.address) { device in
+            DeviceRow(device: device,
+                      isThisMac: headphones.isThisMac(device),
+                      isPending: headphones.pendingDevices.contains(device.address),
+                      replaces: replaced(byConnecting: device),
+                      connect: { headphones.connect(device) },
+                      disconnect: { headphones.disconnect(device) })
+        }
+    }
+
+    /// With two devices connected, the headphones drop the one that isn't playing.
+    private func replaced(byConnecting device: DeviceInfo) -> DeviceInfo? {
+        let connected = headphones.devices.filter(\.isConnected)
+        guard !device.isConnected, connected.count >= 2 else { return nil }
+        return connected.first { !$0.isActive }
+    }
+}
+
+private struct DeviceRow: View {
+    let device: DeviceInfo
+    let isThisMac: Bool
+    let isPending: Bool
+    let replaces: DeviceInfo?
+    let connect: () -> Void
+    let disconnect: () -> Void
+    @State private var hovering = false
+
+    private var canConnect: Bool { !device.isConnected && !isPending }
+    private var canDisconnect: Bool { device.isConnected && !isThisMac && !isPending }
+
+    var body: some View {
+        Button { if canConnect { connect() } } label: {
+            HStack(spacing: 10) {
+                Image(systemName: symbol)
+                    .frame(width: 18)
+                    .foregroundStyle(device.isActive ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(isThisMac ? "This Mac" : device.name)
+                        .fontWeight(device.isActive ? .semibold : .regular)
+                        .lineLimit(1)
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(device.isActive ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                        .lineLimit(1)
+                }
+                Spacer()
+                if isPending {
+                    ProgressView().controlSize(.small)
+                } else if canDisconnect, hovering {
+                    Button(action: disconnect) {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Disconnect \(device.name)")
+                } else if device.isConnected {
+                    Circle().fill(device.isActive ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                        .frame(width: 6, height: 6)
+                        .padding(.trailing, 4)
+                }
+            }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 6)
+            .contentShape(Rectangle())
+            .background(RoundedRectangle(cornerRadius: 6)
+                .fill(hovering && canConnect ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear)))
+        }
+        .buttonStyle(.plain)
+        .disabled(!canConnect && !canDisconnect)
+        .onHover { hovering = $0 }
+        .help(help)
+    }
+
+    private var status: String {
+        switch (isPending, device.isConnected) {
+        case (true, false): "Connecting…"
+        case (true, true): "Disconnecting…"
+        case (false, true): device.isActive ? "Active" : "Connected"
+        case (false, false): "Not connected"
+        }
+    }
+
+    private var help: String {
+        guard canConnect else { return "" }
+        if let replaces { return "Connect \(device.name); disconnects \(replaces.name)" }
+        return "Connect \(device.name)"
+    }
+
+    private var symbol: String {
+        let name = device.name.lowercased()
+        if isThisMac || name.contains("macbook") || name.hasPrefix("mac-") { return "laptopcomputer" }
+        if name.contains("ipad") { return "ipad" }
+        if name.contains("imac") || name.contains("mac mini") || name.contains("mac studio") { return "desktopcomputer" }
+        if name.contains("watch") { return "applewatch" }
+        if name.contains("tv") { return "tv" }
+        return name.contains("iphone") ? "iphone" : "smartphone"
     }
 }
 

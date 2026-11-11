@@ -63,6 +63,28 @@ private func hex(_ s: String) -> [UInt8] {
         #expect(Decode.multipoint([0x07]) == true)
         #expect(Decode.multipoint([0x06]) == false)
     }
+
+    @Test func devices() throws {
+        let list = try #require(Decode.pairedDevices(hex("03bc89c1595bfb40fafe3bd78f603e5f0a5dde5023a251bdd4")))
+        #expect(list.addresses.map(\.description) == ["bc-89-c1-59-5b-fb", "40-fa-fe-3b-d7-8f",
+                                                     "60-3e-5f-0a-5d-de", "50-23-a2-51-bd-d4"])
+        #expect(list.connected == Set(list.addresses.prefix(2)))
+        #expect(Decode.pairedDevices([0x00, 1, 2]) == nil)
+
+        let mac = try #require(Decode.deviceInfo(hex("bc89c1595bfb0302034d41432d484e4850574b59575956")))
+        #expect(mac.name == "MAC-HNHPWKYWYV")
+        #expect(mac.isConnected && mac.isActive)
+        let phone = try #require(Decode.deviceInfo(hex("40fafe3bd78f01020345676e6f2065646765")))
+        #expect(phone.name == "Egno edge")
+        #expect(phone.isConnected && !phone.isActive)
+        let air = try #require(Decode.deviceInfo(hex("603e5f0a5dde000203416c6578e2809973204d6163426f6f6b20416972")))
+        #expect(air.name == "Alex\u{2019}s MacBook Air")
+        #expect(!air.isConnected)
+
+        let mba = try #require(DeviceAddress(hex("603e5f0a5dde")))
+        #expect(Request.connect(mba).bytes == [4, 1, 5, 7, 0] + mba.bytes)
+        #expect(Request.disconnect(mba).bytes == [4, 2, 5, 6] + mba.bytes)
+    }
 }
 
 // MARK: - Client
