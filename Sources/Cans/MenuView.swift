@@ -273,6 +273,14 @@ private struct SettingsMenu: View {
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @AppStorage(Prefs.showBatteryInMenuBar) private var showBatteryInMenuBar = true
 
+    /// "Cans 0.1.0 (6)" from the bundle; unbundled builds (swift run) have no Info.plist.
+    static let appVersion: String = {
+        let info = Bundle.main.infoDictionary
+        guard let version = info?["CFBundleShortVersionString"] as? String else { return "Cans development build" }
+        let build = (info?["CFBundleVersion"] as? String).map { " (\($0))" } ?? ""
+        return "Cans \(version)\(build)"
+    }()
+
     var body: some View {
         Menu {
             Toggle("Launch at login", isOn: Binding(
@@ -300,8 +308,10 @@ private struct SettingsMenu: View {
             if headphones.status == .connected {
                 Button("Refresh") { headphones.refresh() }
             }
+            Divider()
+            Text(Self.appVersion)
             if let firmware = headphones.firmware {
-                Text("Firmware \(firmware)")
+                Text("Headphones firmware \(firmware)")
             }
             Button("Send Feedback…") { NSWorkspace.shared.open(URL(string: "https://github.com/egno/cans/issues")!) }
             Divider()
