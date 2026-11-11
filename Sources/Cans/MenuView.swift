@@ -74,41 +74,33 @@ private func signed(_ v: Int) -> String {
 
 // MARK: - Device card
 
-/// Name, mode and battery of the headphones, like progradio's now-playing card.
+/// Name, mode and battery of the headphones: a compact version of progradio's now-playing card.
 private struct DeviceCard<Accessory: View>: View {
     let headphones: Headphones
     @ViewBuilder let accessory: () -> Accessory
 
-    private static var tileSize: CGFloat { 96 }
-
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            DeviceTile(status: headphones.status, battery: headphones.battery)
-                .frame(width: Self.tileSize, height: Self.tileSize)
-                .shadow(color: .black.opacity(0.2), radius: 6, y: 3)
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .firstTextBaseline) {
-                    Label(modelLabel, systemImage: "headphones")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.tint)
-                        .lineLimit(1)
-                    Spacer(minLength: 4)
-                    accessory()
-                }
-                Text(headphones.name ?? "Bose Headphones")
-                    .font(.headline)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Label(modelLabel, systemImage: headphones.status == .connected ? "headphones" : "headphones.slash")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(headphones.status == .connected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
                     .lineLimit(1)
-                Text(statusLine)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                if headphones.status == .connected {
-                    Facts(battery: headphones.battery, firmware: headphones.firmware)
+                Spacer(minLength: 4)
+                if headphones.status == .connected, let battery = headphones.battery {
+                    BatteryLabel(percent: battery)
                 }
-                Spacer(minLength: 0)
+                accessory()
             }
-            .frame(minHeight: Self.tileSize, alignment: .top)
+            Text(headphones.name ?? "Bose Headphones")
+                .font(.headline)
+                .lineLimit(1)
+            Text(statusLine)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
+        .padding(.horizontal, 6)
     }
 
     private var modelLabel: String {
@@ -125,53 +117,21 @@ private struct DeviceCard<Accessory: View>: View {
     }
 }
 
-/// The card's square: the headphones symbol over the battery level.
-private struct DeviceTile: View {
-    let status: Headphones.Status
-    let battery: Int?
+/// "60%" with a battery symbol; red when low.
+private struct BatteryLabel: View {
+    let percent: Int
 
     var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 10).fill(.quaternary)
-            VStack(spacing: 6) {
-                Image(systemName: status == .connected ? "headphones" : "headphones.slash")
-                    .font(.largeTitle)
-                    .foregroundStyle(status == .connected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                    .symbolEffect(.pulse, options: .repeating, isActive: status == .searching)
-                if status == .connected, let battery {
-                    Text("\(battery)%")
-                        .font(.caption.weight(.semibold))
-                        .monospacedDigit()
-                        .foregroundStyle(battery <= 15 ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
-                }
-            }
-        }
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-    }
-}
-
-/// "Battery 50% · Firmware 1.6.7", with whatever parts are known.
-private struct Facts: View {
-    let battery: Int?
-    let firmware: String?
-
-    var body: some View {
-        HStack(spacing: 4) {
-            if let battery {
-                Image(systemName: Self.batterySymbol(battery))
-                    .foregroundStyle(battery <= 15 ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
-            }
-            if let firmware {
-                Text("Firmware \(firmware.split(separator: "+").first.map(String.init) ?? firmware)")
-                    .help("Firmware \(firmware)")
-            }
+        HStack(spacing: 3) {
+            Text("\(percent)%").monospacedDigit()
+            Image(systemName: symbol)
         }
         .font(.caption)
-        .foregroundStyle(.secondary)
-        .lineLimit(1)
+        .foregroundStyle(percent <= 15 ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+        .help("Battery \(percent)%")
     }
 
-    static func batterySymbol(_ percent: Int) -> String {
+    private var symbol: String {
         switch percent {
         case ..<13: "battery.0percent"
         case ..<38: "battery.25percent"
@@ -326,6 +286,7 @@ private struct SettingsMenu: View {
                     launchAtLogin = SMAppService.mainApp.status == .enabled
                 }))
             Toggle("Show battery in menu bar", isOn: $showBatteryInMenuBar)
+            Toggle("Hide when disconnected", isOn: $headphones.hideWhenDisconnected)
             Toggle("Announce mode changes", isOn: $headphones.announceModeChanges)
             if let autoPause = headphones.autoPause {
                 Toggle("Pause when taken off", isOn: Binding(
@@ -338,6 +299,9 @@ private struct SettingsMenu: View {
             Divider()
             if headphones.status == .connected {
                 Button("Refresh") { headphones.refresh() }
+            }
+            if let firmware = headphones.firmware {
+                Text("Firmware \(firmware)")
             }
             Button("Send Feedback…") { NSWorkspace.shared.open(URL(string: "https://github.com/egno/cans/issues")!) }
             Divider()

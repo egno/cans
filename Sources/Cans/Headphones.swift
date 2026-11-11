@@ -34,6 +34,23 @@ final class Headphones {
         modes.first { $0.index == currentMode }
     }
 
+    /// Remove the menu bar item while the headphones aren't connected.
+    var hideWhenDisconnected: Bool {
+        didSet {
+            UserDefaults.standard.set(hideWhenDisconnected, forKey: Keys.hide)
+            revealed = false
+        }
+    }
+
+    /// Set when the app is opened again while hidden, so settings stay reachable; cleared on connect.
+    private(set) var revealed = false
+
+    var isInMenuBar: Bool {
+        !hideWhenDisconnected || status == .connected || revealed
+    }
+
+    func reveal() { revealed = true }
+
     var announceModeChanges: Bool {
         didSet { UserDefaults.standard.set(announceModeChanges, forKey: Keys.announce) }
     }
@@ -47,10 +64,12 @@ final class Headphones {
     private enum Keys {
         static let address = "lastDeviceAddress"
         static let announce = "announceModeChanges"
+        static let hide = "hideWhenDisconnected"
     }
 
     init() {
         announceModeChanges = UserDefaults.standard.object(forKey: Keys.announce) as? Bool ?? true
+        hideWhenDisconnected = UserDefaults.standard.bool(forKey: Keys.hide)
         observers.install { [weak self] in self?.reconnectSoon() }
         reconnectSoon()
     }
@@ -194,6 +213,7 @@ final class Headphones {
     private func attach(_ c: BMAPClient) {
         client = c
         status = .connected
+        revealed = false
         lastError = nil
         c.onNotification = { [weak self] packet in
             log.info("notification \(packet.description, privacy: .public)")

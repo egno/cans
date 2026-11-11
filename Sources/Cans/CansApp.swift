@@ -6,7 +6,7 @@ struct CansApp: App {
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
 
     var body: some Scene {
-        MenuBarExtra {
+        MenuBarExtra(isInserted: Binding(get: { delegate.headphones.isInMenuBar }, set: { _ in })) {
             MenuView(headphones: delegate.headphones)
         } label: {
             MenuBarLabel(headphones: delegate.headphones)
@@ -22,6 +22,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // No Dock icon, even when launched outside the .app bundle (swift run).
         NSApp.setActivationPolicy(.accessory)
+    }
+
+    /// Opening Cans again while it's hidden shows it until the headphones connect.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        headphones.reveal()
+        return false
     }
 
     func applicationWillTerminate(_ notification: Notification) {
