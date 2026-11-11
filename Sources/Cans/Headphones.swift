@@ -4,7 +4,7 @@ import IOBluetooth
 import Observation
 import os
 
-private let log = Logger(subsystem: "dev.local.cans", category: "headphones")
+private let log = Logger(subsystem: "io.github.egno.cans", category: "headphones")
 
 /// Live state of the connected headphones plus the actions the menu can perform.
 ///

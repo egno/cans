@@ -26,13 +26,34 @@ battery, listening modes, equalizer and a few settings, without the phone app.
 Other Bose devices that speak BMAP on RFCOMM channel 2 (for example QC Ultra
 Headphones 2nd gen) will likely work, but haven't been tested.
 
-## Requirements
+## Install
 
-- macOS 14 or later
-- Xcode 16 or later (Swift 6)
-- Headphones paired with the Mac in System Settings
+**Homebrew**
 
-## Build and run
+```sh
+brew install --cask egno/tap/cans
+```
+
+**Manual:** download `Cans-<version>.dmg` or `.zip` from
+[Releases](https://github.com/egno/cans/releases) and move `Cans.app` to
+`/Applications`.
+
+Cans isn't signed with an Apple Developer ID, so on first launch macOS will say
+it can't verify the developer. Open **System Settings → Privacy & Security**,
+scroll down and click **Open Anyway**, or run:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Cans.app
+```
+
+The Homebrew cask does this for you. Pair your headphones with the Mac in
+System Settings first; on first launch macOS asks for Bluetooth permission.
+
+Requires macOS 14 or later, on Apple Silicon or Intel.
+
+## Build from source
+
+Requires Xcode 16 or later (Swift 6).
 
 ```sh
 ./scripts/bundle.sh          # builds build/Cans.app (release, ad-hoc signed)
@@ -51,7 +72,7 @@ swift run Cans            # runs unbundled; uses your terminal's Bluetooth permi
 Logs:
 
 ```sh
-/usr/bin/log stream --predicate 'subsystem == "dev.local.cans"' --info
+/usr/bin/log stream --predicate 'subsystem == "io.github.egno.cans"' --info
 ```
 
 ## How it works
