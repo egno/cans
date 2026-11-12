@@ -20,7 +20,7 @@ cask "cans" do
 
   url "https://github.com/egno/cans/releases/download/v#{version}/Cans-#{version}.dmg"
   name "Cans"
-  desc "Unofficial menu bar app for Bose QuietComfort Ultra headphones"
+  desc "Unofficial menu bar app for Bose QuietComfort headphones"
   homepage "https://github.com/egno/cans"
 
   livecheck do
