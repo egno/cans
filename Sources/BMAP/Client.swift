@@ -26,8 +26,11 @@ public final class BMAPClient {
 
     private struct Pending {
         let address: Address
-        let continuation: CheckedContinuation<Packet, Error>
+        let continuation: CheckedContinuation<[Packet], Error>
         let timeout: Task<Void, Never>
+        /// STATUS records gathered so far by `enumerate`; nil for a plain
+        /// request, which ends at its first reply.
+        var records: [Packet]?
     }
 
     public init(transport: BMAPTransport) {
@@ -39,10 +42,25 @@ public final class BMAPClient {
     /// Sends `packet` and returns the device's reply for the same address.
     /// Throws `BMAPError.device` when the device answers with an error packet.
     public func send(_ packet: Packet, timeout: Duration = .seconds(2)) async throws -> Packet {
+        guard let reply = try await enqueue(packet, timeout: timeout, collecting: false).first else {
+            throw BMAPError.malformed(packet.address)
+        }
+        return reply
+    }
+
+    /// Sends a START that lists a collection (now playing [5.6]) and returns its
+    /// STATUS records for the same address, in order, once RESULT closes it:
+    /// START, PROCESSING, STATUS..., RESULT. Empty when the collection is.
+    /// Throws like `send`; `timeout` covers the whole listing.
+    public func enumerate(_ packet: Packet, timeout: Duration = .seconds(3)) async throws -> [Packet] {
+        try await enqueue(packet, timeout: timeout, collecting: true)
+    }
+
+    private func enqueue(_ packet: Packet, timeout: Duration, collecting: Bool) async throws -> [Packet] {
         let previous = tail
         let task = Task { @MainActor in
             await previous?.value
-            return try await self.perform(packet, timeout: timeout)
+            return try await self.perform(packet, timeout: timeout, collecting: collecting)
         }
         tail = Task { _ = await task.result }
         return try await task.value
@@ -53,7 +71,7 @@ public final class BMAPClient {
         handleClose()
     }
 
-    private func perform(_ packet: Packet, timeout: Duration) async throws -> Packet {
+    private func perform(_ packet: Packet, timeout: Duration, collecting: Bool) async throws -> [Packet] {
         guard !isClosed else { throw BMAPError.disconnected }
         return try await withCheckedThrowingContinuation { continuation in
             let address = packet.address
@@ -62,7 +80,8 @@ public final class BMAPClient {
                 guard !Task.isCancelled else { return }
                 self?.finish(.failure(BMAPError.timeout(address)))
             }
-            pending = Pending(address: address, continuation: continuation, timeout: timer)
+            pending = Pending(address: address, continuation: continuation, timeout: timer,
+                              records: collecting ? [] : nil)
             do {
                 try transport.write(packet.bytes)
             } catch {
@@ -77,8 +96,15 @@ public final class BMAPClient {
                 if packet.op == .error {
                     let code = packet.payload.first.flatMap(DeviceErrorCode.init(rawValue:))
                     finish(.failure(BMAPError.device(packet.address, code)))
+                } else if let records = pending.records {
+                    switch packet.op {
+                    case .status: self.pending?.records?.append(packet)
+                    case .result: finish(.success(records))
+                    case .processing: break
+                    default: onNotification?(packet)
+                    }
                 } else {
-                    finish(.success(packet))
+                    finish(.success([packet]))
                 }
             } else {
                 onNotification?(packet)
@@ -86,7 +112,7 @@ public final class BMAPClient {
         }
     }
 
-    private func finish(_ result: Result<Packet, Error>) {
+    private func finish(_ result: Result<[Packet], Error>) {
         guard let p = pending else { return }
         pending = nil
         p.timeout.cancel()

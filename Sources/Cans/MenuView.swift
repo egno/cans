@@ -24,12 +24,19 @@ struct MenuView: View {
     @AppStorage(Prefs.showDevices) private var showDevices = true
     @AppStorage(Prefs.showControls) private var showControls = false
     @State private var window: NSWindow?
+    /// Address of the pair being renamed, so the row goes when another pair is shown.
+    @State private var renaming: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: Metrics.sectionSpacing) {
-            DeviceCard(manager: manager) { SettingsMenu(manager: manager) }
+            DeviceCard(manager: manager) {
+                SettingsMenu(manager: manager) { renaming = manager.selected?.address }
+            }
                 // The text column's spacer would otherwise take whatever height the window offers.
                 .fixedSize(horizontal: false, vertical: true)
+            if let session = manager.selected, renaming == session.address {
+                RenameRow(session: session) { renaming = nil }
+            }
             if let error = manager.lastError {
                 Banner(text: error) { manager.dismissError() }
             }
@@ -91,12 +98,12 @@ struct MenuView: View {
             }
             if profile.supports(.pairedDevices), !session.devices.isEmpty {
                 PanelSection(title: "Devices", detail: devicesSummary(session), isExpanded: $showDevices) {
-                    DeviceList(session: session)
+                    DeviceList(session: session, thisMacOnly: manager.thisMacOnly)
                 }
             }
             if profile.supports(.eq), !session.eq.isEmpty {
                 PanelSection(title: "Equalizer", detail: eqSummary(session), isExpanded: $showEqualizer) {
-                    EQPanel(session: session)
+                    EQPanel(session: session, presets: manager.eqPresets)
                 }
             }
             if session.hasControls {
@@ -123,8 +130,9 @@ struct MenuView: View {
         "\(session.devices.filter(\.isConnected).count) connected"
     }
 
-    /// "Flat", or the bands that aren't at zero: "Bass +8 · Treble −2".
+    /// The matching preset's name ("Flat"), or the bands that aren't at zero: "Bass +8 · Treble −2".
     private func eqSummary(_ session: HeadphoneSession) -> String {
+        if let preset = manager.eqPresets.match(session.eq) { return preset.name }
         let changed = session.eq.filter { $0.value != 0 }.sorted { $0.kind.rawValue < $1.kind.rawValue }
         guard !changed.isEmpty else { return "Flat" }
         return changed.map { "\($0.kind.label) \(signed($0.value))" }.joined(separator: " · ")
@@ -147,7 +155,7 @@ private struct WindowReader: NSViewRepresentable {
 }
 
 /// Sizes every section shares, so rows, tiles and headers line up.
-private enum Metrics {
+enum Metrics {
     /// Popover width.
     static let width: CGFloat = 320
     /// Gap between sections, and around their dividers.
@@ -185,7 +193,7 @@ private struct DeviceCard<Accessory: View>: View {
                     .lineLimit(1)
                 Spacer(minLength: 4)
                 if let session, let battery = session.battery {
-                    BatteryLabel(percent: battery, isLow: session.isBatteryLow)
+                    BatteryLabel(percent: battery, isLow: session.isBatteryLow, minutesLeft: session.batteryMinutes)
                 }
                 accessory()
             }
@@ -219,6 +227,7 @@ private struct DeviceCard<Accessory: View>: View {
         guard let session else {
             return manager.status == .searching ? "Looking for headphones…" : "Not connected"
         }
+        if session.isPoweringOff { return "Turning off…" }
         // QC Ultra reports no mode until one is set over Bluetooth this session.
         return session.noiseControlSummary ?? "Connected"
     }
@@ -264,7 +273,7 @@ private struct PairPicker: View {
                 Section("Not Connected") {
                     ForEach(manager.absentPairs) { pair in
                         let connecting = manager.connectingPairs.contains(pair.address)
-                        Button("\(pair.name) · \(connecting ? "Connecting…" : "Not in reach")") {
+                        Button("\(pair.name) · \(absentCaption(connecting: connecting, status: manager.status))") {
                             manager.connect(pair)
                         }
                         .disabled(connecting)
@@ -319,6 +328,7 @@ private struct MacAudioControl: View {
 private struct BatteryLabel: View {
     let percent: Int
     let isLow: Bool
+    var minutesLeft: Int?
 
     var body: some View {
         HStack(spacing: 3) {
@@ -327,7 +337,7 @@ private struct BatteryLabel: View {
         }
         .font(.caption)
         .foregroundStyle(isLow ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
-        .help("Battery \(percent)%")
+        .help("Battery \(percent)%" + (minutesLeft.map { ", about \(playTimeLabel(minutes: $0)) left" } ?? ""))
     }
 
     private var symbol: String {
@@ -366,7 +376,9 @@ private struct DisconnectedPanel: View {
             } else {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(manager.absentPairs) { pair in
-                        AbsentPairRow(pair: pair, isConnecting: manager.connectingPairs.contains(pair.address)) {
+                        let connecting = manager.connectingPairs.contains(pair.address)
+                        AbsentPairRow(pair: pair, isConnecting: connecting,
+                                      caption: absentCaption(connecting: connecting, status: manager.status)) {
                             manager.connect(pair)
                         }
                     }
@@ -392,14 +404,22 @@ private struct DisconnectedPanel: View {
     }
 }
 
+/// "Connecting…" for a pair the user asked for, "Looking…" while a search may still find it,
+/// otherwise a neutral "Not connected": Cans can't tell off from out of reach.
+func absentCaption(connecting: Bool, status: HeadphonesManager.Status) -> String {
+    if connecting { return "Connecting…" }
+    return status == .searching ? "Looking…" : "Not connected"
+}
+
 /// A known pair that isn't connected.
 private struct AbsentPairRow: View {
     let pair: HeadphonesManager.AbsentPair
     let isConnecting: Bool
+    let caption: String
     let connect: () -> Void
 
     var body: some View {
-        ListRow(symbol: "headphones", title: pair.name, caption: isConnecting ? "Connecting…" : "Not in reach") {
+        ListRow(symbol: "headphones", title: pair.name, caption: caption) {
             if isConnecting {
                 ProgressView().controlSize(.small)
             } else {
@@ -409,7 +429,7 @@ private struct AbsentPairRow: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(pair.name), \(isConnecting ? "connecting" : "not in reach")")
+        .accessibilityLabel("\(pair.name), \(caption)")
         .accessibilityActions {
             if !isConnecting { Button("Connect", action: connect) }
         }
@@ -422,6 +442,8 @@ private struct AbsentPairRow: View {
 private struct ModesSection: View {
     let session: HeadphoneSession
     let layout: ModeLayout
+    /// The custom mode being created, changed or deleted, in a form under the list.
+    @State private var editing: ModeEditing?
 
     /// Built-in modes take the first slots; the rest are user modes.
     private var presets: [ModeSlot] { session.modes.filter { Int($0.index) < layout.presetCount } }
@@ -456,11 +478,15 @@ private struct ModesSection: View {
                                     .font(.caption.weight(.semibold))
                                     .foregroundStyle(.tint)
                             }
+                            if let config = session.modeConfig(at: mode.index), session.canEdit(config) {
+                                ModeRowMenu(session: session, config: config, editing: $editing)
+                            }
                         }
                         .accessibilityAddTraits(isSelected ? .isSelected : [])
                     }
                 }
             }
+            ModeExtras(session: session, editing: $editing)
         }
     }
 }
@@ -475,7 +501,8 @@ private struct NoiseCancellingSection: View {
             HStack(spacing: 6) {
                 ForEach(levels, id: \.self) { level in
                     ChoiceTile(title: level.label, symbol: level.symbol, summary: level.summary,
-                               isSelected: session.anc?.level == level) {
+                               isSelected: session.anc?.level == level,
+                               accessibilityTitle: "Noise cancelling \(level.label.lowercased())") {
                         session.setANC(level)
                     }
                 }
@@ -530,6 +557,8 @@ private struct ChoiceTile: View {
     let symbol: String
     let summary: String
     let isSelected: Bool
+    /// When the title alone is ambiguous out of context ("Off").
+    var accessibilityTitle: String?
     let action: () -> Void
     @State private var hovering = false
 
@@ -558,7 +587,7 @@ private struct ChoiceTile: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .help(summary)
-        .accessibilityLabel(title)
+        .accessibilityLabel(accessibilityTitle ?? title)
         .accessibilityHint(summary)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
@@ -566,7 +595,7 @@ private struct ChoiceTile: View {
 
 /// The one row style for lists: a symbol, a title with an optional caption, and something
 /// trailing. The selected row is tinted; a row that does something lights up under the pointer.
-private struct ListRow<Trailing: View>: View {
+struct ListRow<Trailing: View>: View {
     let symbol: String
     let title: String
     var caption: String?
@@ -631,10 +660,12 @@ private struct ListRow<Trailing: View>: View {
 /// When connecting would drop this Mac, and with it Cans' own link, the row asks first.
 private struct DeviceList: View {
     let session: HeadphoneSession
+    let thisMacOnly: ThisMacOnly
     @State private var confirming: DeviceAddress?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            NowPlayingRow(session: session)
             ForEach(session.devices, id: \.address) { device in
                 let dropped = dropped(byConnecting: device)
                 DeviceRow(
@@ -661,6 +692,8 @@ private struct DeviceList: View {
                     cancel: { confirming = nil },
                     disconnect: { session.disconnect(device) })
             }
+            ThisMacOnlyRow(session: session, store: thisMacOnly)
+            AudioRouteRow(session: session)
             if session.profile.supports(.multipoint), let multipoint = session.multipoint {
                 ControlRow(title: "Connect to two devices",
                            help: multipoint
@@ -692,7 +725,10 @@ private struct DeviceList: View {
         case .disconnect: return "Disconnecting…"
         case nil: break
         }
-        if device.isConnected { return device.isActive ? "Active" : "Connected" }
+        if device.isConnected {
+            if session.playingDevice?.address == device.address { return "Playing" }
+            return device.isActive ? "Active" : "Connected"
+        }
         let names = dropped.map(session.displayName(of:))
         switch names.count {
         case 0: return "Not connected"
@@ -801,9 +837,11 @@ private struct DeviceRow: View {
 /// Treble on top, like a mixing console.
 private struct EQPanel: View {
     let session: HeadphoneSession
+    let presets: EQPresetStore
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
+            EQPresetBar(session: session, store: presets)
             ForEach(session.eq.sorted { $0.kind.rawValue > $1.kind.rawValue }) { band in
                 EQSlider(band: band, revision: session.eqRevision) { session.setEQ(band.kind, value: $0) }
             }
@@ -921,8 +959,9 @@ private struct EQSlider: View {
 
 // MARK: - Controls
 
-/// Per-headphone settings, each only where the model has it. Voice prompts are shown
-/// but not yet changeable: their write format hasn't been confirmed on hardware.
+/// Per-headphone settings, each only where the model has it. Voice prompts are shown here
+/// only where they can't be changed (their write is unconfirmed on a QC35 II); where they
+/// can, they're in the gear menu with the other rarely used settings.
 private struct ControlsPanel: View {
     @Bindable var manager: HeadphonesManager
     let session: HeadphoneSession
@@ -946,6 +985,7 @@ private struct ControlsPanel: View {
                     Toggle("Announce mode changes", isOn: $manager.announceModeChanges)
                 }
             }
+            CallModeRow(session: session, calls: manager.callSwitch)
             if session.profile.supports(.sidetone), let sidetone = session.sidetone {
                 ControlRow(title: "Self voice", help: "How much of your own voice you hear on calls") {
                     Picker("Self voice", selection: Binding(
@@ -972,7 +1012,7 @@ private struct ControlsPanel: View {
                     }
                 }
             }
-            if session.profile.supports(.voicePrompts), let prompts = session.voicePrompts {
+            if session.profile.supports(.voicePrompts), !session.canChangeVoicePrompts, let prompts = session.voicePrompts {
                 ControlRow(title: "Voice prompts", help: "Spoken announcements; can't be changed here yet") {
                     Text(voicePromptsLabel(prompts))
                         .foregroundStyle(.secondary)
@@ -1002,7 +1042,7 @@ private struct ControlsPanel: View {
 
 /// A caption label with a compact control on the right: the label in primary, the value
 /// in secondary, so the eye lands on what each row is.
-private struct ControlRow<Control: View>: View {
+struct ControlRow<Control: View>: View {
     let title: String
     let help: String
     @ViewBuilder let control: () -> Control
@@ -1067,9 +1107,12 @@ func voicePromptsLabel(_ prompts: VoicePrompts) -> String {
 
 // MARK: - Settings
 
-/// Set-once app options and links, kept out of the way in a gear menu.
+/// Set-once options and links, kept out of the way in a gear menu: the app's own, and the
+/// shown headphones' rarely used ones.
 private struct SettingsMenu: View {
     @Bindable var manager: HeadphonesManager
+    /// Opens the row for typing a new name; a menu can't hold a text field.
+    let rename: () -> Void
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @AppStorage(Prefs.showBatteryInMenuBar) private var showBatteryInMenuBar = true
 
@@ -1083,7 +1126,10 @@ private struct SettingsMenu: View {
 
     var body: some View {
         Menu {
-            // App settings only; the headphones' own are in the Controls section.
+            if let session = manager.selected, session.isLoaded {
+                HeadphoneMenuItems(session: session, rename: rename)
+            }
+            // App settings; the headphones' everyday ones are in the Controls section.
             Section("Cans") {
                 Toggle("Launch at login", isOn: Binding(get: { launchAtLogin }, set: setLaunchAtLogin))
                 Toggle("Show battery in menu bar", isOn: $showBatteryInMenuBar)
@@ -1094,6 +1140,13 @@ private struct SettingsMenu: View {
                 Text(Self.appVersion)
                 if let firmware = manager.selected?.firmware {
                     Text("Headphones firmware \(firmware)")
+                }
+                if let session = manager.selected, session.profile.supports(.serialNumber),
+                   let serial = session.serial, !serial.isEmpty {
+                    Button("Copy Serial Number \(serial)") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(serial, forType: .string)
+                    }
                 }
                 Button("Send Feedback…") { NSWorkspace.shared.open(URL(string: "https://github.com/egno/cans/issues")!) }
             }

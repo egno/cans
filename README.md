@@ -17,15 +17,25 @@ modes or noise cancelling, equalizer and a few settings, without the phone app.
 - Play the Mac's audio on a chosen pair (switches the default output, like the Sound menu)
 - Switch listening modes: Quiet, Aware, Immersion and your custom modes
   (QC Ultra), or the noise cancelling level (QC35 II)
-- See paired devices and switch the headphones between them
-- 3-band equalizer (treble / mid / bass, −10…+10)
+- QC Ultra: create, edit and delete custom modes (name, noise cancelling strength, wind block,
+  immersive audio), pick the modes the headphones' button cycles through, and whether they
+  turn on in the last mode used
+- QC Ultra: immersive audio off, still or motion
+- Switch to a chosen mode while the Mac is on a call, and back afterwards
+- See paired devices and switch the headphones between them; on a QC Ultra, also which
+  device is playing, the track's title, and a link to move audio to the other connected device
+- "This Mac Only": disconnect the headphones' other devices in one click, and reconnect them later
+- 3-band equalizer (treble / mid / bass, −10…+10) with built-in and your own named presets
 - Toggle auto-pause on removal, auto-answer calls and multipoint
 - Choose what the Action button (QC35 II) or the Shortcut button's long press (QC Ultra) does,
   from the actions the headphones report
-- QC35 II: self voice (sidetone), auto-off timer
+- Self voice (sidetone) and auto-off timer
+- QC Ultra, in the gear menu: rename the headphones, voice prompts (on/off, language, battery
+  announcement), pairing mode, turn off; firmware and serial number
 - Optional voice announcement on mode change
 - Reconnects automatically: on Bluetooth connect, on wake, and with backoff
 - Launch at login
+- Scriptable from the command line, `cans://` URLs and the Shortcuts app
 
 ## Supported headphones
 
@@ -87,6 +97,48 @@ Logs:
 /usr/bin/log stream --predicate 'subsystem == "io.github.egno.cans"' --info
 ```
 
+## Scripting
+
+The app's binary is also a command line tool: given a command, it passes it to the
+running Cans and prints the answer. Link it somewhere on your `PATH` once:
+
+```sh
+ln -s /Applications/Cans.app/Contents/MacOS/Cans /usr/local/bin/cans
+```
+
+```sh
+cans status                      # every connected pair: battery, mode, equalizer, devices
+cans status --json               # also firmware, serial number, immersive audio, favourite
+                                 # modes, what's playing and from which device, where reported
+cans mode Aware                  # a listening mode, or a noise cancelling level (off, low, high)
+cans eq Bass boost               # an equalizer preset; `cans presets` lists them
+cans this-mac-only               # drop the other devices; again to bring them back (or on / off)
+cans disconnect iPhone           # one of the headphones' paired devices
+cans connect iPhone
+cans immersive still             # immersive audio: off, still or motion (QC Ultra)
+cans power-off                   # turn the headphones off (QC Ultra)
+cans mode Quiet --headset Atom   # another pair than the one the popover shows, by name or address
+```
+
+Names match without case, and a unique beginning is enough. The exit status is 0 when
+the headphones did it, 1 with the reason on stderr when they didn't, 69 when Cans isn't running.
+
+The same commands work as URLs, which don't report back; a failure shows in the popover:
+
+```sh
+open "cans://mode/Quiet"
+open "cans://eq/Bass%20boost?headset=Atom"
+open "cans://this-mac-only/toggle"
+```
+
+In the **Shortcuts** app use *Run Shell Script* with the commands above (its output can
+feed the next action), or *Open URLs* with a `cans://` URL. Cans has no Shortcuts actions
+of its own: those need metadata that only an Xcode build generates.
+
+A call is the Mac's microphone being in use by any app. Pick the mode for calls under
+**Controls**; it applies when the headphones are the Mac's output or its microphone, and
+the previous mode comes back after the call unless you changed it meanwhile.
+
 ## How it works
 
 Bose's apps control headphones with an undocumented protocol called **BMAP**.
@@ -106,7 +158,7 @@ quitting never interrupts playback.
 |---|---|
 | `Sources/BMAP` | Packet framing, payload decoders, request builders, and a request/response client. No Bluetooth code, fully unit-tested. |
 | `Sources/BMAP/Profiles` | One `ModelProfile` per model: product IDs, fallback channel, supported features, noise control style. |
-| `Sources/Cans` | IOBluetooth RFCOMM transport, `HeadphonesManager` (discovery, one `HeadphoneSession` per connected pair), SwiftUI `MenuBarExtra` UI. |
+| `Sources/Cans` | IOBluetooth RFCOMM transport, `HeadphonesManager` (discovery, one `HeadphoneSession` per connected pair), SwiftUI `MenuBarExtra` UI, and the features on top: call mode, This Mac Only, equalizer presets, scripting. |
 | `Tests/BMAPTests` | Tests using bytes captured from real headphones. |
 | `Tests/CansTests` | Session tests against a fake device. |
 
@@ -120,6 +172,18 @@ quitting never interrupts playback.
 | `31.6` | GET `[index]` | Mode slot config: name at offset 6 (32 bytes), slots 0–9 |
 | `1.24`, `1.27` | GET / SETGET `[0/1]` | Auto-pause, auto-answer |
 | `1.9` | GET / SETGET `[0x80, 9, action]` | Shortcut button long press `[button, event, action, supported mask (4 bytes)]` |
+| `31.6` | SETGET (39 bytes) | Create or change a custom mode: `[index, prompt (2), name (32), level, auto, immersive, wind block]` |
+| `31.9` | START `[index]` | Reset a custom slot (deletes the mode) |
+| `31.5`, `31.8` | GET / SETGET | Remember last mode `[0/1]`; favourite modes `[count, bitmask…]` |
+| `5.15` | GET / SETGET `[0/1/2]` | Immersive audio: off, still, motion |
+| `5.1`, `5.6` | GET; START (listing) | Audio source `[mask (2), type, MAC]`; now playing, one record per attribute |
+| `1.2`, `1.3` | SETGET | Name (bare UTF-8, 31 bytes); voice prompts `[flags, battery announcement]` |
+| `0.7` | GET | Serial number |
+| `7.4`, `4.8`, `4.12` | START | Power off, pairing mode, move audio to a connected device |
+
+Not every write above has been tried on a 1st-gen QC Ultra: immersive audio and favourites
+haven't, and power off, pairing mode and audio routing are known only from the 2nd gen.
+Cans shows the headphones' answer in the popover if they refuse.
 
 The `1.9` supported mask is a big-endian bitset over action numbers (bit 0 in the
 last byte); other models may add a 4-byte mask of currently unavailable actions.

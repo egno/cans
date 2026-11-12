@@ -4,48 +4,123 @@ import Testing
 
 // MARK: - Fakes
 
-/// Answers GETs from a table, like a device that knows only those addresses.
+/// Answers GETs from a table, like a device that knows only those addresses. Writes are
+/// echoed, except the few whose reply a real device shapes differently.
 @MainActor
 final class FakeDevice: BMAPTransport {
     var onReceive: (([UInt8]) -> Void)?
     var onClose: (() -> Void)?
     var written: [Packet] = []
     var replies: [Address: [UInt8]] = [:]
-    /// Mode slots by index; past the last one the device answers with an error.
-    var slots: [UInt8: String] = [:]
+    /// Mode slots by index, as names; past the last one the device answers with an error.
+    /// The first three are built in, the rest the user's ("None" when unused).
+    var slots: [UInt8: String] = [:] {
+        didSet {
+            records = [:]
+            for (index, name) in slots {
+                records[index] = Self.modeRecord(index: index, name: name, prompt: index < 3 ? UInt16(index) + 1 : 0,
+                                                 userConfigurable: index >= 3, favorite: index < 3)
+            }
+        }
+    }
+    /// The same slots as full [31.6] records.
+    var records: [UInt8: [UInt8]] = [:]
+    /// Now-playing records by id; nil answers the listing with an error, as with nothing playing.
+    var nowPlaying: [UInt8: String]?
+    /// Device info [4.5] payloads by the last byte of the address asked for.
+    var deviceInfos: [UInt8: [UInt8]] = [:]
     var failWrites = false
+    /// Requests that get no answer at all.
+    var silent: Set<Address> = []
+    /// Turning off takes the link down instead of answering.
+    var dropsOnPowerOff = false
+
+    /// A 47-byte mode record in the QC Ultra's read layout.
+    static func modeRecord(index: UInt8, name: String, prompt: UInt16 = 0, userConfigurable: Bool = true,
+                           favorite: Bool = false, cncLevel: UInt8 = 0, autoCNC: Bool = false,
+                           spatial: UInt8 = 0, windBlock: Bool = false) -> [UInt8] {
+        let nameBytes = Array(name.utf8) + [UInt8](repeating: 0, count: 32 - name.utf8.count)
+        return [index, UInt8(prompt >> 8), UInt8(prompt & 0xff), userConfigurable ? 1 : 0, name == "None" ? 0 : 1,
+                favorite ? 1 : 0] + nameBytes
+            + [0, 0, 0, userConfigurable ? 0x0d : 0x02, cncLevel, autoCNC ? 1 : 0, spatial, 0, windBlock ? 1 : 0]
+    }
 
     func write(_ bytes: [UInt8]) throws {
         var stream = PacketStream()
         guard let packet = stream.append(bytes).first else { return }
         written.append(packet)
-        let reply: Packet
-        switch packet.op {
-        case .get where packet.address == .modeConfig:
-            let index = packet.payload.first ?? 0
-            if let name = slots[index] {
-                let nameBytes = Array(name.utf8) + [UInt8](repeating: 0, count: 32 - name.utf8.count)
-                reply = Packet(.modeConfig, .status, [index, 0, 0, 0, 0, 0] + nameBytes)
-            } else {
-                reply = Packet(.modeConfig, .error, [DeviceErrorCode.invalidData.rawValue])
-            }
-        case .get:
-            if let payload = replies[packet.address] {
-                reply = Packet(packet.address, .status, payload)
-            } else {
-                reply = Packet(packet.address, .error, [DeviceErrorCode.functionNotSupported.rawValue])
-            }
-        default:
-            reply = failWrites
-                ? Packet(packet.address, .error, [DeviceErrorCode.invalidData.rawValue])
-                : Packet(packet.address, .status, packet.payload)
+        if packet.address == .power, packet.op == .start, dropsOnPowerOff {
+            onClose?()
+            return
         }
-        Task { @MainActor in self.onReceive?(reply.bytes) }
+        guard !silent.contains(packet.address) else { return }
+        let replies = answer(packet)
+        Task { @MainActor in replies.forEach { self.onReceive?($0.bytes) } }
+    }
+
+    private func answer(_ packet: Packet) -> [Packet] {
+        let address = packet.address
+        func error(_ code: DeviceErrorCode) -> [Packet] { [Packet(address, .error, [code.rawValue])] }
+        switch (packet.op, address) {
+        case (.get, .modeConfig):
+            guard let record = records[packet.payload.first ?? 0] else { return error(.invalidData) }
+            return [Packet(.modeConfig, .status, record)]
+        case (.get, .deviceInfo) where deviceInfos[packet.payload.last ?? 0] != nil:
+            return [Packet(address, .status, deviceInfos[packet.payload.last ?? 0] ?? [])]
+        case (.get, _):
+            guard let payload = replies[address] else { return error(.functionNotSupported) }
+            return [Packet(address, .status, payload)]
+        case (.start, .nowPlaying):
+            guard let nowPlaying else { return error(.runtime) }
+            return [Packet(address, .processing)]
+                + nowPlaying.sorted { $0.key < $1.key }.map { Packet(address, .status, [$0.key] + Array($0.value.utf8)) }
+                + [Packet(address, .result)]
+        case _ where failWrites:
+            return error(.invalidData)
+        case (.setGet, .modeConfig):
+            // Built-in modes refuse; the reply is the record as a read gives it.
+            let p = packet.payload
+            guard p.count == 39, let old = records[p[0]], old[3] != 0 else { return error(.invalidData) }
+            let record = Self.modeRecord(index: p[0], name: Decode.string(Array(p[3..<35])),
+                                         prompt: UInt16(p[1]) << 8 | UInt16(p[2]), favorite: old[5] != 0,
+                                         cncLevel: p[35], autoCNC: p[36] != 0, spatial: p[37], windBlock: p[38] != 0)
+            records[p[0]] = record
+            return [Packet(address, .status, record)]
+        case (.start, .resetMode):
+            guard let index = packet.payload.first, let old = records[index], old[3] != 0 else { return error(.invalidData) }
+            records[index] = Self.modeRecord(index: index, name: "None")
+            return [Packet(address, .result, [index])]
+        case (.setGet, .productName):
+            // Written bare, read back with the leading flag byte.
+            replies[address] = [0] + packet.payload
+            return [Packet(address, .status, [0] + packet.payload)]
+        case (.setGet, .voicePrompts) where packet.payload.count == 2:
+            // The QC Ultra's write: byte 0 and the battery announcement, which reads back at byte 6.
+            var record = replies[address] ?? [0, 0, 0, 0, 0, 0, 0]
+            record[0] = packet.payload[0]
+            if record.count >= 7 { record[6] = packet.payload[1] }
+            replies[address] = record
+            return [Packet(address, .status, record)]
+        case (.setGet, .favorites), (.setGet, .immersiveAudio), (.setGet, .rememberMode):
+            replies[address] = packet.payload
+            return [Packet(address, .status, packet.payload)]
+        default:
+            return [Packet(address, .status, packet.payload)]
+        }
     }
 
     func close() {}
 
     var requested: Set<Address> { Set(written.map(\.address)) }
+}
+
+/// Waits for something a session does in its own task, without guessing how long it takes.
+@MainActor
+func eventually(within limit: Duration = .seconds(5), _ done: () -> Bool) async {
+    let deadline = ContinuousClock.now + limit
+    while !done(), ContinuousClock.now < deadline {
+        try? await Task.sleep(for: .milliseconds(5))
+    }
 }
 
 @MainActor
@@ -117,12 +192,18 @@ private func makeSession(_ profile: ModelProfile, _ device: FakeDevice, _ host: 
         await session.reload()
 
         #expect(session.modes.map(\.name) == ["Quiet", "Aware", "Immersion", "Commute"])
+        // Slot 5 answered with an error, which ends the list; the unused slot is kept for a new mode.
+        #expect(device.written.filter { $0.address == .modeConfig }.map(\.payload) == [[0], [1], [2], [3], [4], [5]])
+        #expect(session.modeConfigs.map(\.index) == [0, 1, 2, 3, 4])
+        #expect(session.emptyModeSlot?.index == 3)
         #expect(session.noiseControlSummary == "Aware mode")
         #expect(!device.requested.contains(.ancLevel))
         #expect(device.requested.contains(.eq))
         #expect(session.hasControls)   // the announce-mode-changes switch
-        // Firmware, model name, the toggles and the Shortcut button have no reply in the table.
-        #expect(host.failures == ["read 6 settings"])
+        // Every single-request setting is asked for once; the four in the table answer.
+        let settings = ModelProfile.qcUltra.settingAddresses
+        #expect(device.requested.isSuperset(of: Set(settings)))
+        #expect(host.failures == ["read \(settings.count - 4) settings"])
     }
 
     @Test func failedWriteRevertsTheTile() async throws {
@@ -170,13 +251,30 @@ private func makeSession(_ profile: ModelProfile, _ device: FakeDevice, _ host: 
         // A phone the headphones know, not connected.
         let phone = try #require(Decode.deviceInfo([0x40, 0xfa, 0xfe, 0x3b, 0xd7, 0x8f, 0, 2, 3] + Array("Phone".utf8)))
         session.connect(phone)
-        try await Task.sleep(for: .milliseconds(50))
+        // The request is answered; the result that ends the change is still to come.
+        await eventually { session.completedWrites == 1 }
         #expect(session.pendingDevices[phone.address] == .connect)
         // Connecting the phone dropped this Mac, and with it the channel.
         device.onClose?()
+        #expect(session.pendingDevices.isEmpty)
         try await Task.sleep(for: .milliseconds(50))
         #expect(session.pendingDevices.isEmpty)
         #expect(host.failures.isEmpty)
+    }
+
+    @Test func closeBeforeTheConnectRequestIsAnsweredIsNotAFailure() async throws {
+        let device = FakeDevice(), host = FakeHost()
+        device.silent = [.connectDevice]
+        let session = makeSession(.qcUltra, device, host)
+        let phone = try #require(Decode.deviceInfo([0x40, 0xfa, 0xfe, 0x3b, 0xd7, 0x8f, 0, 2, 3] + Array("Phone".utf8)))
+        session.connect(phone)
+        await eventually { !device.written.isEmpty }
+        #expect(session.pendingDevices[phone.address] == .connect)
+        device.onClose?()
+        await eventually { session.completedWrites == 1 }
+        #expect(session.pendingDevices.isEmpty)
+        #expect(host.failures.isEmpty)
+        #expect(host.closed == 1)
     }
 
     @Test func alreadyClosedClientMakesAClosedSession() async throws {
@@ -224,6 +322,22 @@ private func makeSession(_ profile: ModelProfile, _ device: FakeDevice, _ host: 
         #expect(!device.requested.contains(.eq))
     }
 
+    @Test func refreshOnOpenIsQuietAndNeverOverlaps() async throws {
+        let device = FakeDevice(), host = FakeHost()
+        device.replies = [.pairedDevices: [0x00]]   // every setting read fails
+        let session = makeSession(.qc35II, device, host)
+        await session.reload()
+        #expect(host.failures == ["read 8 settings"])
+
+        host.failures = []
+        device.written = []
+        session.refreshOnOpen(minimumInterval: .zero)
+        session.refreshOnOpen(minimumInterval: .zero)   // the first is still running
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(host.failures.isEmpty)
+        #expect(device.written.filter { $0.address == .battery }.count == 1)
+    }
+
     @Test func closeIsReportedOnce() {
         let device = FakeDevice(), host = FakeHost()
         let session = makeSession(.generic(), device, host)
@@ -263,6 +377,13 @@ private func makeSession(_ profile: ModelProfile, _ device: FakeDevice, _ host: 
         let symbols = ANCLevel.allCases.map(\.symbol)
         #expect(Set(symbols).count == symbols.count)
         #expect(Set(ANCLevel.allCases.map(\.summary)).count == ANCLevel.allCases.count)
+    }
+
+    @Test func absentPairCaption() {
+        #expect(absentCaption(connecting: true, status: .searching) == "Connecting…")
+        #expect(absentCaption(connecting: false, status: .searching) == "Looking…")
+        #expect(absentCaption(connecting: false, status: .unavailable) == "Not connected")
+        #expect(absentCaption(connecting: false, status: .connected) == "Not connected")
     }
 
     @Test func autoOffLabels() {

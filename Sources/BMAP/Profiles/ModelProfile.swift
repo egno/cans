@@ -9,6 +9,31 @@ public enum Feature: Hashable, Sendable, CaseIterable {
     case ancLevel, sidetone, actionButton, autoOff, voicePrompts
     /// [4.4] list, [4.5] device info, [4.1] connect, [4.2] disconnect.
     case pairedDevices
+
+    /// [0.7] serial number, read with `Decode.string`.
+    case serialNumber
+    /// [1.2] accepts a new name (`Request.setProductName`).
+    case rename
+    /// [5.15] spatial audio: off, still or motion.
+    case immersiveAudio
+    /// [31.6] records carry the full mode (`Decode.modeConfig`), and custom
+    /// modes can be written (`Request.setModeConfig`) and reset [31.9].
+    case customModes
+    /// [31.5] power on in the last mode used.
+    case rememberMode
+    /// [31.8] which modes the headphones' button cycles through.
+    case favorites
+    /// [5.6] track metadata, by `BMAPClient.enumerate(Request.nowPlaying())`.
+    case nowPlaying
+    /// [5.1] the device the headphones are playing from.
+    case audioSource
+    /// [7.4] `Request.powerOff`. This and the two below are confirmed on other
+    /// models only: be ready for an error reply.
+    case powerOff
+    /// [4.8] `Request.setPairingMode`.
+    case pairingMode
+    /// [4.12] `Request.routeAudio(to:)` between two connected devices.
+    case audioRouting
 }
 
 public struct ModelProfile: Sendable, Equatable {
@@ -21,9 +46,13 @@ public struct ModelProfile: Sendable, Equatable {
     public let noiseControl: NoiseControl?
     /// True when tested on hardware; false when assumed from other sources.
     public let verified: Bool
+    /// The shape of a voice prompts write, for `Request.setVoicePrompts(_:format:)`.
+    public let voicePromptsFormat: VoicePromptsFormat
 
     public init(id: String, displayName: String, productIDs: Set<UInt16>, rfcommChannel: UInt8,
-                features: Set<Feature>, noiseControl: NoiseControl?, verified: Bool) {
+                features: Set<Feature>, noiseControl: NoiseControl?, verified: Bool,
+                voicePromptsFormat: VoicePromptsFormat = .flagsOnly) {
+        self.voicePromptsFormat = voicePromptsFormat
         self.id = id
         self.displayName = displayName
         self.productIDs = productIDs
@@ -104,7 +133,8 @@ public extension ModelProfile {
             (.battery, .battery), (.eq, .eq), (.autoPause, .autoPause), (.autoAnswer, .autoAnswer),
             (.multipoint, .multipoint), (.modes, .currentMode), (.ancLevel, .ancLevel),
             (.sidetone, .sidetone), (.actionButton, .actionButton), (.autoOff, .autoOff),
-            (.voicePrompts, .voicePrompts),
+            (.voicePrompts, .voicePrompts), (.serialNumber, .serialNumber), (.audioSource, .audioSource),
+            (.immersiveAudio, .immersiveAudio), (.rememberMode, .rememberMode), (.favorites, .favorites),
         ]
         return all.filter { supports($0.0) }.map(\.1)
     }

@@ -8,24 +8,34 @@ public extension Address {
     static let bmapVersion = Address(0, 1)
     static let productID = Address(0, 3)
     static let firmware = Address(0, 5)
+    static let serialNumber = Address(0, 7)
     static let modelName = Address(0, 15)
     static let productName = Address(1, 2)
-    static let voicePrompts = Address(1, 3)     // QC35 II
-    static let autoOff = Address(1, 4)          // QC35 II
+    static let voicePrompts = Address(1, 3)     // QC35 II, QC Ultra
+    static let autoOff = Address(1, 4)          // QC35 II, QC Ultra
     static let ancLevel = Address(1, 6)         // QC35 II
     static let actionButton = Address(1, 9)     // QC35 II, QC Ultra
-    static let sidetone = Address(1, 11)        // QC35 II
+    static let sidetone = Address(1, 11)        // QC35 II, QC Ultra
     static let eq = Address(1, 7)
     static let multipoint = Address(1, 10)
     static let connectDevice = Address(4, 1)
     static let disconnectDevice = Address(4, 2)
     static let pairedDevices = Address(4, 4)
     static let deviceInfo = Address(4, 5)
+    static let pairingMode = Address(4, 8)
+    static let audioRouting = Address(4, 12)
+    static let audioSource = Address(5, 1)
+    static let nowPlaying = Address(5, 6)
+    static let immersiveAudio = Address(5, 15)
+    static let power = Address(7, 4)
     static let autoPause = Address(1, 24)
     static let autoAnswer = Address(1, 27)
     static let battery = Address(2, 2)
     static let currentMode = Address(31, 3)
+    static let rememberMode = Address(31, 5)
     static let modeConfig = Address(31, 6)
+    static let favorites = Address(31, 8)
+    static let resetMode = Address(31, 9)
 }
 
 public enum Request {
@@ -68,6 +78,7 @@ public enum Request {
     }
 
     /// `minutes` should be one of `AutoOff.choices`; others are likely rejected.
+    /// Written on a QC Ultra gen 1 as `3c` (60) and `00` (never).
     public static func setAutoOff(minutes: UInt8) -> Packet {
         setGet(.autoOff, [minutes])
     }
@@ -77,6 +88,61 @@ public enum Request {
     /// Untested; keep it behind a hardware check before exposing it.
     public static func setVoicePrompts(on: Bool, language: UInt8) -> Packet {
         setGet(.voicePrompts, [(on ? VoicePrompts.onBit : 0) | (language & VoicePrompts.languageMask)])
+    }
+
+    /// Writes voice prompt settings in the model's format (`ModelProfile.voicePromptsFormat`).
+    /// Build `prompts` from the last reading with `VoicePrompts.with(...)` so the
+    /// bits nobody has explained go back as they were read. Nil when the format
+    /// needs the battery announcement and the reading didn't carry it.
+    ///
+    /// QC Ultra gen 1: `[byte 0, battery announcement]`, written on hardware.
+    /// QC35 II: the single based-connect byte, untested.
+    public static func setVoicePrompts(_ prompts: VoicePrompts, format: VoicePromptsFormat) -> Packet? {
+        switch format {
+        case .flagsOnly:
+            return setGet(.voicePrompts, [prompts.raw & (VoicePrompts.onBit | VoicePrompts.languageMask)])
+        case .flagsAndBatteryAnnouncement:
+            guard let announce = prompts.batteryAnnouncement else { return nil }
+            return setGet(.voicePrompts, [prompts.raw, announce ? 1 : 0])
+        }
+    }
+
+    /// Renames the headphones [1.2]: bare UTF-8 with no flag byte (the read has a
+    /// leading `00`). Cut to `ProductName.maxBytes` on a character boundary; nil
+    /// when nothing is left to write.
+    public static func setProductName(_ name: String) -> Packet? {
+        let bytes = truncatedUTF8(name.trimmingWhitespace(), maxBytes: ProductName.maxBytes)
+        return bytes.isEmpty ? nil : setGet(.productName, bytes)
+    }
+
+    // Actions below are confirmed on the 2nd-gen QC Ultra only (bosectl); on other
+    // models expect an error reply, or none at all.
+
+    /// Turns the headphones off [7.4]. The connection drops, so a reply may never come.
+    public static func powerOff() -> Packet {
+        Packet(.power, .start, [0])
+    }
+
+    /// Enters (or leaves) Bluetooth pairing mode [4.8].
+    public static func setPairingMode(_ on: Bool) -> Packet {
+        Packet(.pairingMode, .start, [on ? 1 : 0])
+    }
+
+    /// Moves playback to `device`, one of the two connected devices [4.12].
+    public static func routeAudio(to device: DeviceAddress) -> Packet {
+        Packet(.audioRouting, .start, [0x82] + device.bytes)
+    }
+
+    /// The longest prefix of `text` that fits `maxBytes` of UTF-8 without splitting
+    /// a character (grapheme cluster). NULs are dropped: the device reads them as the end.
+    static func truncatedUTF8(_ text: String, maxBytes: Int) -> [UInt8] {
+        var out: [UInt8] = []
+        for character in text where character != "\0" {
+            let bytes = Array(String(character).utf8)
+            guard out.count + bytes.count <= maxBytes else { break }
+            out += bytes
+        }
+        return out
     }
 
     /// Replies PROCESSING, then RESULT once connected. With two devices already
@@ -318,9 +384,24 @@ public struct ActionButtonState: Equatable, Sendable {
     }
 }
 
+public enum ProductName {
+    /// Longest name [1.2] takes, in UTF-8 bytes (bosectl MAX_NAME_BYTES).
+    public static let maxBytes = 31
+}
+
 public enum AutoOff {
-    /// Minutes; 0 means never.
+    /// Minutes; 0 means never. The setting is one byte, so the Bose app's 24 hours
+    /// (1440 minutes) has no known encoding and isn't offered.
     public static let choices: [UInt8] = [0, 5, 20, 40, 60, 180]
+}
+
+/// How a model takes voice prompt writes at [1.3].
+public enum VoicePromptsFormat: Sendable, Equatable {
+    /// One byte, `on bit | language` (based-connect; QC35 II, untested).
+    case flagsOnly
+    /// `[byte 0, battery announcement]` (QC Ultra gen 1). The two are written
+    /// together although the announcement reads back at byte 6.
+    case flagsAndBatteryAnnouncement
 }
 
 public struct VoicePrompts: Equatable, Sendable {
@@ -330,8 +411,22 @@ public struct VoicePrompts: Equatable, Sendable {
     public let isOn: Bool
     /// Index into `languageNames`; 1 is US English.
     public let language: UInt8
-    /// The whole byte 0, so a writer can preserve bits we don't understand.
+    /// The whole byte 0, so a writer can preserve bits we don't understand
+    /// (0x40 follows the language somehow; 0x80 is set on every reading so far).
     public let raw: UInt8
+    /// "Battery level at start": byte 6 of the QC Ultra's 7-byte record. Nil on
+    /// shorter records (the QC35 II's 5 bytes aren't mapped).
+    public let batteryAnnouncement: Bool?
+
+    /// A copy with some settings changed and the unexplained bits kept, for
+    /// `Request.setVoicePrompts(_:format:)`.
+    public func with(isOn: Bool? = nil, language: UInt8? = nil, batteryAnnouncement: Bool? = nil) -> VoicePrompts {
+        let on = isOn ?? self.isOn
+        let language = (language ?? self.language) & Self.languageMask
+        let raw = (self.raw & ~(Self.onBit | Self.languageMask)) | (on ? Self.onBit : 0) | language
+        return VoicePrompts(isOn: on, language: language, raw: raw,
+                            batteryAnnouncement: batteryAnnouncement ?? self.batteryAnnouncement)
+    }
 
     public var languageName: String? {
         Int(language) < Self.languageNames.count ? Self.languageNames[Int(language)] : nil
@@ -346,7 +441,7 @@ public struct VoicePrompts: Equatable, Sendable {
 }
 
 public enum Decode {
-    /// `[percent, ...]`; 0xff means unknown.
+    /// `[percent, ...]`; 0xff means unknown. `batteryReadings` has the rest of the record.
     public static func battery(_ p: [UInt8]) -> Int? {
         guard let v = p.first, v <= 100 else { return nil }
         return Int(v)
@@ -455,10 +550,21 @@ public enum Decode {
     }
 
     /// `[flags, ...]`: bit 5 on, low 5 bits language. The trailing bytes
-    /// (`00 04 cf de` on a QC35 II) are not understood.
+    /// (`00 04 cf de` on a QC35 II) are not understood. A QC Ultra sends 7 bytes,
+    /// `e1 00 01 81 5e 01 01`, where byte 6 is the battery announcement.
     public static func voicePrompts(_ p: [UInt8]) -> VoicePrompts? {
         guard let b = p.first else { return nil }
         return VoicePrompts(isOn: b & VoicePrompts.onBit != 0,
-                            language: b & VoicePrompts.languageMask, raw: b)
+                            language: b & VoicePrompts.languageMask, raw: b,
+                            batteryAnnouncement: p.count >= 7 ? p[6] != 0 : nil)
+    }
+}
+
+private extension String {
+    func trimmingWhitespace() -> String {
+        var s = Substring(self)
+        while let c = s.first, c.isWhitespace { s.removeFirst() }
+        while let c = s.last, c.isWhitespace { s.removeLast() }
+        return String(s)
     }
 }

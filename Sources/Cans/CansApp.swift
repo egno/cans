@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-@main
+/// Started by `Main` (CommandLine.swift), which is the command line tool when given a command.
 struct CansApp: App {
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
 
@@ -18,10 +18,32 @@ struct CansApp: App {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let manager = HeadphonesManager()
+    /// Commands from `cans://` URLs and the command line tool.
+    private lazy var scripting = ScriptServer(manager: manager)
+
+    /// Early, so the URL that launched Cans isn't missed.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        handleURLs()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // No Dock icon, even when launched outside the .app bundle (swift run).
         NSApp.setActivationPolicy(.accessory)
+        // Again, in case SwiftUI installed a handler of its own in between.
+        handleURLs()
+    }
+
+    private func handleURLs() {
+        _ = scripting
+        NSAppleEventManager.shared().setEventHandler(
+            self, andSelector: #selector(openURL(_:reply:)),
+            forEventClass: AEEventClass(kInternetEventClass), andEventID: AEEventID(kAEGetURL))
+    }
+
+    @objc private func openURL(_ event: NSAppleEventDescriptor, reply: NSAppleEventDescriptor) {
+        guard let string = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
+              let url = URL(string: string) else { return }
+        scripting.open(url)
     }
 
     /// Opening Cans again while it's hidden shows it until the headphones connect.

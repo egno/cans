@@ -34,6 +34,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key>    <string>14.0</string>
     <key>LSUIElement</key>               <true/>
     <key>NSHumanReadableCopyright</key>  <string>MIT License</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>   <string>io.github.egno.cans</string>
+            <key>CFBundleURLSchemes</key><array><string>cans</string></array>
+        </dict>
+    </array>
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>Cans talks to your Bose headphones over Bluetooth to show battery and change modes.</string>
 </dict>

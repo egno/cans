@@ -161,6 +161,282 @@ private func hex(_ s: String) -> [UInt8] {
     }
 }
 
+// MARK: - QC Ultra settings (captures: QC Ultra gen 1 fw 1.6.7, own and bose-rfcomm's)
+
+@Suite struct UltraSettingsTests {
+    private let aware = hex("0100020000014177617265000000000000000000000000000000000000000000000000000000000000020a01000000")
+    private let empty = hex("0300000100004e6f6e65000000000000000000000000000000000000000000000000000000000000000d0a00000100")
+
+    @Test func selfVoice() {
+        // Read `01 03 0f`: low, all four levels supported. Write `[01, level]`.
+        #expect(Decode.sidetone(hex("01030f")) == SidetoneState(level: .low, supported: [.off, .high, .medium, .low]))
+        #expect(Request.setSidetone(.low).bytes == hex("010b0202" + "0103"))
+        #expect(Request.setSidetone(.off).payload == [1, 0])
+        #expect(Decode.sidetone([1, 3]) == nil)
+    }
+
+    @Test func autoOff() {
+        #expect(Decode.autoOff([0x3c]) == 60)
+        #expect(Decode.autoOff([0]) == 0)
+        #expect(Decode.autoOff([]) == nil)
+        #expect(Request.setAutoOff(minutes: 0).bytes == hex("01040201" + "00"))
+        #expect(AutoOff.choices.allSatisfy { $0 == 0 || $0 >= 5 })
+    }
+
+    @Test func immersiveAudio() {
+        #expect(Decode.immersiveAudio([0]) == .off)
+        #expect(Decode.immersiveAudio([1]) == .still)
+        #expect(Decode.immersiveAudio([2]) == .motion)
+        #expect(Decode.immersiveAudio([3]) == nil)
+        #expect(Decode.immersiveAudio([]) == nil)
+        #expect(Request.setImmersiveAudio(.motion).bytes == hex("050f0201" + "02"))
+    }
+
+    @Test func modeConfigRead() throws {
+        let config = try #require(Decode.modeConfig(aware))
+        #expect(config.index == 1 && config.name == "Aware")
+        #expect(config.prompt == 2 && config.promptName == "Aware")
+        #expect(!config.userConfigurable && !config.userConfigured && config.isFavorite)
+        #expect(config.mutability == [.autoCNC])
+        #expect(config.cncLevel == 10 && config.autoCNC)
+        #expect(config.spatial == .off && config.windBlock == false)
+        #expect(!config.isEmpty)
+        #expect(config.slot == Decode.modeSlot(aware))
+
+        let none = try #require(Decode.modeConfig(empty))
+        #expect(none.isEmpty && none.name == "None" && none.promptName == "None")
+        #expect(none.userConfigurable && !none.userConfigured && !none.isFavorite)
+        #expect(none.mutability == [.cncLevel, .spatial, .windBlock])
+
+        // Immersion: motion at byte 44. A wind block mode: byte 46.
+        var immersion = aware
+        immersion[44] = 2
+        immersion[46] = 1
+        #expect(Decode.modeConfig(immersion)?.spatial == .motion)
+        #expect(Decode.modeConfig(immersion)?.windBlock == true)
+        immersion[44] = 9
+        #expect(Decode.modeConfig(immersion)?.spatial == nil)
+
+        // A silent user mode has prompt 0 and a real name: stored, not empty.
+        var silent = empty
+        silent.replaceSubrange(6..<10, with: Array("Desk".utf8))
+        #expect(Decode.modeConfig(silent)?.isEmpty == false)
+        #expect(ModeConfig.promptName(0x22) == "Immersion" && ModeConfig.promptName(0x0d) == "Focus")
+        #expect(ModeConfig.promptName(500) == nil)
+    }
+
+    @Test func modeConfigTruncated() {
+        // Earbuds stop at 44 bytes, before the spatial and wind bytes.
+        let earbuds = try? #require(Decode.modeConfig(Array(aware.prefix(44))))
+        #expect(earbuds?.name == "Aware" && earbuds?.cncLevel == 10)
+        #expect(earbuds?.spatial == nil && earbuds?.windBlock == nil)
+        #expect(Decode.modeConfig(Array(aware.prefix(46)))?.windBlock == nil)
+        for length in [0, 1, 6, 38, 43] {
+            #expect(Decode.modeConfig(Array(aware.prefix(length))) == nil)
+        }
+        #expect(Decode.modeConfig([DeviceErrorCode.runtime.rawValue]) == nil)
+        #expect(Decode.modeSlot(Array(aware.prefix(37))) == nil)
+    }
+
+    @Test func modeConfigWrite() throws {
+        // bose-rfcomm's write: `1f 06 02 27  09 0000 "WindTest"…32  00 00 00 01`.
+        let wind = ModeEdit(index: 9, name: "WindTest", cncLevel: 4, windBlock: true)
+        let name = Array("WindTest".utf8) + [UInt8](repeating: 0, count: 24)
+        #expect(Request.setModeConfig(wind).bytes == hex("1f060227") + [9, 0, 0] + name + [0, 0, 0, 1])
+
+        let focus = ModeEdit(index: 3, name: "Focus", prompt: 0x0d, cncLevel: 99, autoCNC: true, spatial: .still)
+        let payload = focus.payload
+        #expect(payload.count == 39)
+        #expect(Array(payload[0..<3]) == [3, 0, 0x0d])
+        #expect(Array(payload[35...]) == [10, 1, 1, 0])
+
+        // Editing a record copies its settings, never its 47 bytes.
+        var edit = ModeEdit(editing: try #require(Decode.modeConfig(aware)))
+        #expect(edit == ModeEdit(index: 1, name: "Aware", prompt: 2, cncLevel: 10, autoCNC: true))
+        edit.name = "Walk"
+        #expect(edit.payload.count == 39 && edit.payload != Array(aware.prefix(39)))
+        #expect(Array(edit.payload[3..<8]) == Array("Walk".utf8) + [0])
+    }
+
+    @Test func modeNameTruncatesOnACharacter() {
+        func name(_ s: String) -> [UInt8] { Array(ModeEdit(index: 4, name: s).payload[3..<35]) }
+        // 31 bytes fit, with the closing NUL.
+        let fits = String(repeating: "a", count: 31)
+        #expect(name(fits) == Array(fits.utf8) + [0])
+        #expect(name(fits + "bc") == Array(fits.utf8) + [0])
+        // "é" is 2 bytes: 15 fit (30 bytes); the 16th would end at 32.
+        let accents = name(String(repeating: "é", count: 20))
+        #expect(Decode.string(accents) == String(repeating: "é", count: 15))
+        #expect(accents[30...] == [0, 0])
+        // A flag is one character of 8 bytes; it's kept whole or dropped.
+        let flags = name(String(repeating: "a", count: 28) + "🇫🇷")
+        #expect(Decode.string(flags) == String(repeating: "a", count: 28))
+        #expect(name("a\0b") == Array("ab".utf8) + [UInt8](repeating: 0, count: 30))
+        #expect(name("") == [UInt8](repeating: 0, count: 32))
+    }
+
+    @Test func rememberMode() {
+        #expect(Decode.bool([1]) == true)
+        #expect(Decode.bool([]) == nil)
+        #expect(Request.get(.rememberMode).bytes == hex("1f050100"))
+        #expect(Request.setRememberMode(false).bytes == hex("1f050201" + "00"))
+        #expect(Request.setRememberMode(true).payload == [1])
+    }
+
+    @Test func voicePrompts() throws {
+        // English, prompts on, battery announcement on.
+        let vp = try #require(Decode.voicePrompts(hex("e10001815e0101")))
+        #expect(vp.isOn && vp.language == 1 && vp.languageName == "US English")
+        #expect(vp.raw == 0xe1 && vp.batteryAnnouncement == true)
+        let spanish = try #require(Decode.voicePrompts(hex("a60001815e0100")))
+        #expect(spanish.languageName == "MX Spanish" && spanish.batteryAnnouncement == false)
+
+        // Bits 6-7 go back as read; the announcement is the write's second byte.
+        let off = vp.with(isOn: false)
+        #expect(!off.isOn && off.raw == 0xc1 && off.language == 1)
+        #expect(Request.setVoicePrompts(off, format: .flagsAndBatteryAnnouncement)?.bytes == hex("01030202" + "c101"))
+        #expect(Request.setVoicePrompts(vp.with(language: 6, batteryAnnouncement: false),
+                                        format: .flagsAndBatteryAnnouncement)?.payload == [0xe6, 0])
+        #expect(Request.setVoicePrompts(spanish.with(isOn: true), format: .flagsAndBatteryAnnouncement)?.payload
+                == [0xa6, 0])
+        #expect(vp.with() == vp)
+
+        // The QC35 II's 5 bytes don't say where the announcement is, so no 2-byte write.
+        let qc35 = try #require(Decode.voicePrompts(hex("a10004cfde")))
+        #expect(qc35.batteryAnnouncement == nil)
+        #expect(Request.setVoicePrompts(qc35, format: .flagsAndBatteryAnnouncement) == nil)
+        #expect(Request.setVoicePrompts(qc35.with(isOn: false), format: .flagsOnly)?.payload == [0x01])
+        #expect(Request.setVoicePrompts(qc35, format: .flagsOnly) == Request.setVoicePrompts(on: true, language: 1))
+        #expect(Decode.voicePrompts([]) == nil)
+        #expect(Decode.voicePrompts(hex("e10001815e01"))?.batteryAnnouncement == nil)
+    }
+
+    @Test func rename() throws {
+        #expect(Decode.productName(hex("00756c7472612d6870")) == "ultra-hp")
+        #expect(Decode.productName([]) == "")
+        #expect(Request.setProductName("ultra-hp")?.bytes == hex("01020208") + Array("ultra-hp".utf8))
+        #expect(Request.setProductName("  Atom \n")?.payload == Array("Atom".utf8))
+        #expect(Request.setProductName("   ") == nil)
+        let long = try #require(Request.setProductName(String(repeating: "x", count: 40)))
+        #expect(long.payload.count == ProductName.maxBytes)
+        let accents = try #require(Request.setProductName(String(repeating: "é", count: 20)))
+        #expect(accents.payload.count == 30)
+        #expect(String(decoding: accents.payload, as: UTF8.self) == String(repeating: "é", count: 15))
+    }
+
+    @Test func favorites() throws {
+        let read = try #require(Decode.favorites(hex("0a001f")))
+        #expect(read.modeCount == 10 && read.modes == [0, 1, 2, 3, 4])
+        #expect(read.payload == hex("0a001f"))
+        #expect(Decode.favorites(hex("0807"))?.modes == [0, 1, 2])   // QC Earbuds II
+
+        let changed = read.setting(9, favorite: true).setting(3, favorite: false)
+        #expect(changed.modes == [0, 1, 2, 4, 9])
+        #expect(Request.setFavorites(changed).bytes == hex("1f080203" + "0a0217"))
+        #expect(Decode.favorites(changed.payload) == changed)
+        // Modes past the mask are dropped rather than written out of bounds.
+        #expect(read.setting(10, favorite: true) == read)
+        #expect(Favorites(modeCount: 11, modes: [0, 9, 200]).payload == [11, 0x02, 0x01])
+        #expect(Favorites(modeCount: 0, modes: [1]).payload == [0])
+
+        #expect(Decode.favorites([]) == nil)
+        #expect(Decode.favorites(hex("0a1f")) == nil)   // 10 modes need two mask bytes
+        #expect(Decode.favorites([0]) == Favorites(modeCount: 0, modes: []))
+        #expect(Decode.favorites([DeviceErrorCode.invalidData.rawValue]) == nil)
+    }
+
+    @Test func resetMode() {
+        #expect(Request.resetMode(9).bytes == hex("1f090501" + "09"))
+    }
+
+    @Test func actions() throws {
+        #expect(Request.powerOff().bytes == hex("07040501" + "00"))
+        #expect(Request.setPairingMode(true).bytes == hex("04080501" + "01"))
+        #expect(Request.setPairingMode(false).payload == [0])
+        let mac = try #require(DeviceAddress(hex("bc89c1595bfb")))
+        #expect(Request.routeAudio(to: mac).bytes == hex("040c0507" + "82" + "bc89c1595bfb"))
+    }
+}
+
+@Suite struct ReadoutTests {
+    @Test func nowPlaying() {
+        // bose-rfcomm: 00 "Not Provided"  03 "1"  04 "1"  06 "0".
+        let records = [[0] + Array("Not Provided".utf8), [3] + Array("1".utf8), [4] + Array("1".utf8),
+                       [6] + Array("0".utf8)].map { Packet(.nowPlaying, .status, $0) }
+        let idle = Decode.nowPlaying(records)
+        #expect(idle.title == nil && idle.trackNumber == 1 && idle.totalTracks == 1 && idle.genre == "0")
+        #expect(idle.attributes[0] == "Not Provided" && !idle.isEmpty)
+
+        let playing = Decode.nowPlaying([
+            Packet(.nowPlaying, .status, [0] + Array("Blue in Green".utf8)),
+            Packet(.nowPlaying, .status, [1] + Array("Miles Davis".utf8)),
+            Packet(.nowPlaying, .status, []),                 // malformed: skipped
+            Packet(.battery, .status, [0, 0x41]),             // another address: skipped
+            Packet(.nowPlaying, .status, [3]),                // id with no text
+        ])
+        #expect(playing.title == "Blue in Green" && playing.text(1) == "Miles Davis")
+        #expect(playing.trackNumber == nil && playing.attributes.count == 3)
+
+        #expect(Decode.nowPlaying([]).isEmpty)
+        #expect(Decode.nowPlaying([Packet(.nowPlaying, .status, [0] + Array("Not Provided".utf8))]).isEmpty)
+        #expect(Decode.nowPlayingRecord([]) == nil)
+        #expect(Decode.nowPlayingRecord([4, 0x37])?.text == "7")
+        #expect(Request.nowPlaying().bytes == hex("05060500"))
+    }
+
+    @Test func serialNumber() {
+        #expect(Request.get(.serialNumber).bytes == hex("00070100"))
+        #expect(Decode.string(Array("081234Z51234567AE".utf8)) == "081234Z51234567AE")
+        #expect(Decode.string([]) == "")
+    }
+
+    @Test func audioSource() throws {
+        let playing = try #require(Decode.audioSource(hex("000f01" + "bc89c1595bfb")))
+        #expect(playing.kind == .bluetooth && playing.supported == 0x000f)
+        #expect(playing.device?.description == "bc-89-c1-59-5b-fb")
+        #expect(Decode.audioSource(hex("000f00")) == AudioSource(kind: AudioSource.Kind.none, device: nil, supported: 0x0f))
+        #expect(Decode.audioSource(hex("000f02"))?.kind == .aux)
+        #expect(Decode.audioSource(hex("000f07"))?.kind == nil)
+        // A Bluetooth source with a short address: the type survives, the device doesn't.
+        #expect(Decode.audioSource(hex("000f01bc89")) == AudioSource(kind: .bluetooth, device: nil, supported: 0x0f))
+        #expect(Decode.audioSource(hex("000f")) == nil)
+        #expect(Decode.audioSource([]) == nil)
+    }
+
+    @Test func batteryReadings() {
+        // QC Ultra gen 1: minutes unknown.
+        #expect(Decode.batteryReadings(hex("32ffff00"))
+                == [BatteryReading(percent: 50, minutesRemaining: nil, component: 0)])
+        #expect(Decode.batteryReadings(hex("5a04b000"))
+                == [BatteryReading(percent: 90, minutesRemaining: 1200, component: 0)])
+        // Earbuds: one record per bud.
+        #expect(Decode.batteryReadings(hex("64ffff01" + "5a012c02")).map(\.minutesRemaining) == [nil, 300])
+        // QC35: a lone percent.
+        #expect(Decode.batteryReadings([0x46]) == [BatteryReading(percent: 70, minutesRemaining: nil, component: nil)])
+        #expect(Decode.batteryReadings([0xff]).first?.percent == nil)
+        #expect(Decode.batteryReadings([]).isEmpty)
+        // Short and ragged payloads keep what's whole.
+        #expect(Decode.batteryReadings(hex("32ffff")) == [BatteryReading(percent: 50, minutesRemaining: nil, component: nil)])
+        #expect(Decode.batteryReadings(hex("32ffff00" + "5a04")).count == 1)
+        // The percent-only decoder is unchanged.
+        #expect(Decode.battery(hex("5a04b000")) == 90)
+    }
+
+    /// Error replies carry one code byte; no decoder may trap on it or on nothing.
+    @Test func shortPayloadsNeverTrap() {
+        for payload in [[], [0x05], [0xff, 0xff]] as [[UInt8]] {
+            _ = Decode.battery(payload); _ = Decode.batteryReadings(payload); _ = Decode.string(payload)
+            _ = Decode.productName(payload); _ = Decode.eq(payload); _ = Decode.currentMode(payload)
+            _ = Decode.modeSlot(payload); _ = Decode.modeConfig(payload); _ = Decode.bool(payload)
+            _ = Decode.pairedDevices(payload); _ = Decode.deviceInfo(payload); _ = Decode.multipoint(payload)
+            _ = Decode.productID(payload); _ = Decode.anc(payload); _ = Decode.sidetone(payload)
+            _ = Decode.actionButton(payload); _ = Decode.autoOff(payload); _ = Decode.voicePrompts(payload)
+            _ = Decode.immersiveAudio(payload); _ = Decode.favorites(payload); _ = Decode.audioSource(payload)
+            _ = Decode.nowPlayingRecord(payload)
+        }
+    }
+}
+
 // MARK: - Profiles
 
 @Suite struct ProfileTests {
@@ -184,6 +460,31 @@ private func hex(_ s: String) -> [UInt8] {
         #expect(ModelProfile.qcUltra.supports(.modes) && !ModelProfile.qcUltra.supports(.ancLevel))
         #expect(ModelProfile.qcUltra.supports(.actionButton) && qc35.supports(.actionButton))
         #expect(ModelProfile.generic().features == [.productName, .firmware, .battery, .pairedDevices])
+    }
+
+    @Test func qcUltraSettings() {
+        let ultra = ModelProfile.qcUltra, qc35 = ModelProfile.qc35II
+        let added: [Feature] = [.serialNumber, .rename, .immersiveAudio, .customModes, .rememberMode, .favorites,
+                                .nowPlaying, .audioSource, .powerOff, .pairingMode, .audioRouting]
+        for f in added {
+            #expect(ultra.supports(f), "QC Ultra should have \(f)")
+            #expect(!qc35.supports(f) && !ModelProfile.generic().supports(f), "\(f) is QC Ultra only")
+        }
+        #expect(ultra.supports(.sidetone) && ultra.supports(.autoOff) && ultra.supports(.voicePrompts))
+        #expect(ultra.voicePromptsFormat == .flagsAndBatteryAnnouncement)
+        #expect(qc35.voicePromptsFormat == .flagsOnly && ModelProfile.generic().voicePromptsFormat == .flagsOnly)
+
+        let reads = ultra.settingAddresses
+        for address in [Address.sidetone, .autoOff, .voicePrompts, .serialNumber, .audioSource,
+                        .immersiveAudio, .rememberMode, .favorites] {
+            #expect(reads.contains(address), "QC Ultra should read \(address)")
+            #expect(ModelProfile.generic().settingAddresses.contains(address) == false)
+        }
+        // Enumerations, indexed reads and actions aren't plain GETs.
+        for address in [Address.nowPlaying, .modeConfig, .resetMode, .power, .pairingMode, .audioRouting] {
+            #expect(!reads.contains(address))
+        }
+        #expect(!qc35.settingAddresses.contains(.serialNumber))
     }
 
     @Test func noiseControl() throws {
@@ -274,6 +575,55 @@ final class FakeTransport: BMAPTransport {
         #expect(ra.payload == [5])
         #expect(rb.payload == [3])
         #expect(t.written.count == 2)
+    }
+
+    @Test func enumerateCollectsRecordsUntilResult() async throws {
+        let t = FakeTransport()
+        t.responder = { _ in
+            Packet(.nowPlaying, .processing).bytes
+                + Packet(.nowPlaying, .status, [0] + Array("Song".utf8)).bytes
+                + Packet(.currentMode, .status, [2]).bytes
+                + Packet(.nowPlaying, .status, [3, 0x34]).bytes
+                + Packet(.nowPlaying, .result).bytes
+                + Packet(.nowPlaying, .status, [9]).bytes   // after the end: not ours
+        }
+        let c = BMAPClient(transport: t)
+        var notes: [Packet] = []
+        c.onNotification = { notes.append($0) }
+
+        let records = try await c.enumerate(Request.nowPlaying())
+        #expect(records.map(\.payload) == [[0] + Array("Song".utf8), [3, 0x34]])
+        #expect(Decode.nowPlaying(records).title == "Song")
+        #expect(notes == [Packet(.currentMode, .status, [2]), Packet(.nowPlaying, .status, [9])])
+
+        // The next request isn't confused by the listing.
+        t.responder = { _ in Packet(.battery, .status, [77]).bytes }
+        #expect(try await c.send(Request.get(.battery)).payload == [77])
+    }
+
+    @Test func enumerateHandlesEmptyErrorAndSilence() async throws {
+        let t = FakeTransport()
+        let c = BMAPClient(transport: t)
+        t.responder = { _ in Packet(.nowPlaying, .processing).bytes + Packet(.nowPlaying, .result).bytes }
+        #expect(try await c.enumerate(Request.nowPlaying()).isEmpty)
+
+        t.responder = { _ in Packet(.nowPlaying, .error, [8]).bytes }
+        await #expect(throws: BMAPError.device(.nowPlaying, .runtime)) {
+            try await c.enumerate(Request.nowPlaying())
+        }
+        // An error with no code byte, and one this library has no name for.
+        t.responder = { _ in Packet(.power, .error).bytes }
+        await #expect(throws: BMAPError.device(.power, nil)) { try await c.send(Request.powerOff()) }
+        t.responder = { _ in Packet(.audioRouting, .error, [0x18]).bytes }
+        await #expect(throws: BMAPError.device(.audioRouting, nil)) {
+            try await c.enumerate(Packet(.audioRouting, .start))
+        }
+
+        // PROCESSING and a record, then nothing.
+        t.responder = { _ in Packet(.nowPlaying, .processing).bytes + Packet(.nowPlaying, .status, [0, 0x41]).bytes }
+        await #expect(throws: BMAPError.timeout(.nowPlaying)) {
+            try await c.enumerate(Request.nowPlaying(), timeout: .milliseconds(50))
+        }
     }
 
     @Test func failsPendingOnClose() async {

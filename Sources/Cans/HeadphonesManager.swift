@@ -61,6 +61,15 @@ final class HeadphonesManager: SessionHost {
 
     var lowBatterySessions: [HeadphoneSession] { sessions.filter(\.isBatteryLow) }
 
+    // MARK: - Extras
+
+    // Features on top of the headphones' own settings; each lives in its own file.
+    let eqPresets = EQPresetStore()
+    let thisMacOnly = ThisMacOnly()
+    let callSwitch = CallModeSwitch()
+    /// Hears every failure shown to the user, with the pair it's about (Scripting.swift).
+    @ObservationIgnored var onFailure: ((HeadphoneSession, String) -> Void)?
+
     // MARK: - Mac audio
 
     /// The Mac's audio outputs. Separate from the BMAP link: a pair can be connected to
@@ -140,6 +149,7 @@ final class HeadphonesManager: SessionHost {
     @ObservationIgnored private var batteryAlerts: [String: BatteryAlerts] = [:]
     @ObservationIgnored private var errorDismissTask: Task<Void, Never>?
     @ObservationIgnored private var isPopoverOpen = false
+    @ObservationIgnored private var lastErrorPair: String?
     /// Addresses that have answered BMAP before; these are worth retrying.
     @ObservationIgnored private var knownAddresses: Set<String> {
         didSet { UserDefaults.standard.set(Array(knownAddresses).sorted(), forKey: Keys.known) }
@@ -171,6 +181,7 @@ final class HeadphonesManager: SessionHost {
         lowBatteryAlerts = defaults.object(forKey: Keys.lowBatteryAlerts) as? Bool ?? true
         if lowBatteryAlerts { BatteryAlerts.requestAuthorization() }
         observers.install { [weak self] event in self?.handle(event) }
+        callSwitch.start(manager: self)
         // Local list, no radio: lets the first popover name known pairs before any pass ends.
         updateAbsentPairs()
         requestPass()
@@ -186,12 +197,14 @@ final class HeadphonesManager: SessionHost {
     func dismissError() {
         errorDismissTask?.cancel()
         lastError = nil
+        lastErrorPair = nil
     }
 
     func session(_ session: HeadphoneSession, couldNot action: String, because error: Error) {
         log.error("\(session.address, privacy: .public) couldn't \(action, privacy: .public): \(String(describing: error), privacy: .public)")
         // Name the pair only when there's more than one it could be.
         showError(Self.message(action: action, error: error, pair: sessions.count > 1 ? session.displayName : nil))
+        onFailure?(session, Self.message(action: action, error: error, pair: nil))
     }
 
     /// "Couldn't <action>[ on <pair>]: <reason>"
@@ -200,9 +213,11 @@ final class HeadphonesManager: SessionHost {
     }
 
     /// Shows the message in the popover. It goes after a few seconds of being on screen,
-    /// so one that comes up while the popover is closed waits to be seen.
-    private func showError(_ message: String) {
+    /// so one that comes up while the popover is closed waits to be seen. `about` names
+    /// the pair a connect error is for, so it can go when that pair connects after all.
+    private func showError(_ message: String, about address: String? = nil) {
         lastError = message
+        lastErrorPair = address
         scheduleErrorDismiss()
     }
 
@@ -250,17 +265,22 @@ final class HeadphonesManager: SessionHost {
 
     // MARK: - Connection
 
-    /// Asks macOS to bring up the pair's Bluetooth link, then probes it at once.
+    /// Asks macOS to bring up the pair's Bluetooth link, then probes it ahead of any
+    /// background pass. The link request is best effort; the probe pages the device itself.
     func connect(_ pair: AbsentPair) {
         guard !connectingPairs.contains(pair.address), session(for: pair.address) == nil,
               let device = IOBluetoothDevice(addressString: pair.address) else { return }
         connectingPairs.insert(pair.address)
+        // The user is waiting: stop a background pass at its next device and resume it after.
+        if isConnecting {
+            connectTask?.cancel()
+            rescanRequested = true
+        }
         Task {
             defer { connectingPairs.remove(pair.address) }
-            guard await linkOpener.open(device) else {
-                showError("Couldn't connect \(pair.name): not in reach")
-                return
-            }
+            let link = await linkOpener.open(device)
+            // A link that just came up needs a moment for its services, as after a connect event.
+            if link == .opened { try? await Task.sleep(for: .seconds(2)) }
             let found = await withRadio {
                 guard session(for: pair.address) == nil, !isShuttingDown else { return true }
                 probing = pair.address
@@ -269,16 +289,27 @@ final class HeadphonesManager: SessionHost {
                     lastProbed[pair.address] = .now
                 }
                 return await probe(device, address: pair.address)
+            } ?? false
+            if !found {
+                showError("Couldn't connect \(pair.name): "
+                          + (link == .failed ? "not in reach" : "the headphones didn't answer"),
+                          about: pair.address)
+                // The pair's own connect event may have been ignored while we probed it.
+                backoff = .zero
+                rescanRequested = true
             }
             // Events that came in meanwhile were queued behind the radio.
             if rescanRequested { requestPass() }
-            if !found { showError("Couldn't connect \(pair.name): the headphones didn't answer") }
         }
     }
 
     /// One probe at a time: the loop and a user's Connect share the radio.
-    private func withRadio<T>(_ body: () async -> T) async -> T {
-        while isConnecting { try? await Task.sleep(for: .milliseconds(200)) }
+    /// Nil when the task is cancelled while waiting.
+    private func withRadio<T>(_ body: () async -> T) async -> T? {
+        while isConnecting {
+            try? await Task.sleep(for: .milliseconds(200))
+            if Task.isCancelled { return nil }
+        }
         isConnecting = true
         defer { isConnecting = false }
         return await body()
@@ -346,7 +377,7 @@ final class HeadphonesManager: SessionHost {
 
     /// Probes each candidate that has no session yet. True if one connected.
     private func connectToCandidates() async -> Bool {
-        await withRadio { await probeCandidates() }
+        await withRadio { await probeCandidates() } ?? false
     }
 
     private func probeCandidates() async -> Bool {
@@ -440,10 +471,8 @@ final class HeadphonesManager: SessionHost {
             session.close()
             return false
         }
-        if sessions.isEmpty {
-            revealed = false
-            lastError = nil
-        }
+        if sessions.isEmpty { revealed = false }
+        if sessions.isEmpty || lastErrorPair == session.address { dismissError() }
         sessions.append(session)
         knownAddresses.insert(session.address)
         absentPairs.removeAll { $0.address == session.address }

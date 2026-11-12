@@ -200,27 +200,43 @@ final class SDPQuery: NSObject {
 }
 
 /// Brings up the baseband link to a paired device, the way connecting it in Bluetooth
-/// settings does, so a pair that's on but not linked can be probed. Long-lived for the
-/// same reason as `SDPQuery`; one attempt per device at a time.
+/// settings does, so a pair that's on but not linked can be probed. Best effort: opening
+/// the RFCOMM channel pages the device too, so callers probe whatever this returns.
+///
+/// Long-lived and bookkept like `SDPQuery`: the callback carries no attempt ID, so a
+/// device gets no new attempt until the last one called back (or is long overdue).
 @MainActor
 final class LinkOpener: NSObject {
+    enum Result: Equatable {
+        /// macOS already reports a link; nothing was done.
+        case alreadyUp
+        /// This call brought the link up; give the device a moment before talking to it.
+        case opened
+        /// Refused, timed out, or an earlier attempt is still out.
+        case failed
+    }
+
     private struct Waiter {
         let continuation: CheckedContinuation<Bool, Never>
         let timer: Task<Void, Never>
     }
 
     private var waiting: [String: Waiter] = [:]
+    /// Attempts started and not yet called back, by address.
+    private var inFlight: [String: ContinuousClock.Instant] = [:]
+    private static let overdue: Duration = .seconds(60)
 
-    /// True once the link is up.
-    func open(_ device: IOBluetoothDevice, timeout: Duration = .seconds(15)) async -> Bool {
-        if device.isConnected() { return true }
+    func open(_ device: IOBluetoothDevice, timeout: Duration = .seconds(10)) async -> Result {
+        // Unreliable on current macOS, but a yes is worth trusting.
+        if device.isConnected() { return .alreadyUp }
         let key = device.addressString ?? ""
-        guard waiting[key] == nil else { return false }
-        return await withCheckedContinuation { cont in
+        if let started = inFlight[key], .now - started < Self.overdue { return .failed }
+        let ok = await withCheckedContinuation { cont in
             guard device.openConnection(self) == kIOReturnSuccess else {
                 cont.resume(returning: false)
                 return
             }
+            inFlight[key] = .now
             let timer = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: timeout)
                 guard !Task.isCancelled else { return }
@@ -228,6 +244,7 @@ final class LinkOpener: NSObject {
             }
             waiting[key] = Waiter(continuation: cont, timer: timer)
         }
+        return ok ? .opened : .failed
     }
 
     private func finish(_ key: String, _ ok: Bool) {
@@ -236,8 +253,13 @@ final class LinkOpener: NSObject {
         waiter.continuation.resume(returning: ok)
     }
 
+    private func completed(_ key: String, _ ok: Bool) {
+        guard inFlight.removeValue(forKey: key) != nil else { return }
+        finish(key, ok)
+    }
+
     @objc nonisolated func connectionComplete(_ device: IOBluetoothDevice!, status: IOReturn) {
         let key = device?.addressString ?? ""
-        MainActor.assumeIsolated { finish(key, status == kIOReturnSuccess) }
+        MainActor.assumeIsolated { completed(key, status == kIOReturnSuccess) }
     }
 }
