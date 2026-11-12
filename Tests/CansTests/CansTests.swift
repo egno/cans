@@ -121,8 +121,8 @@ private func makeSession(_ profile: ModelProfile, _ device: FakeDevice, _ host: 
         #expect(!device.requested.contains(.ancLevel))
         #expect(device.requested.contains(.eq))
         #expect(session.hasControls)   // the announce-mode-changes switch
-        // Firmware, model name and the toggles have no reply in the table.
-        #expect(host.failures == ["read 5 settings"])
+        // Firmware, model name, the toggles and the Shortcut button have no reply in the table.
+        #expect(host.failures == ["read 6 settings"])
     }
 
     @Test func failedWriteRevertsTheTile() async throws {
@@ -137,6 +137,31 @@ private func makeSession(_ profile: ModelProfile, _ device: FakeDevice, _ host: 
         #expect(session.anc?.level == .high)
         #expect(host.failures == ["change noise cancelling"])
         #expect(device.written.last == Request.setANC(.off))
+    }
+
+    @Test func qcUltraShortcutButtonWritesWhatItReported() async throws {
+        let device = FakeDevice(), host = FakeHost()
+        // Captured from a QC Ultra gen 1: long press does spatial audio.
+        device.replies = [.actionButton: [0x80, 0x09, 0x13, 0x00, 0x09, 0x40, 0x0a], .pairedDevices: [0x00]]
+        let session = makeSession(.qcUltra, device, host)
+        await session.reload()
+        #expect(device.requested.contains(.actionButton))
+        #expect(session.actionButton?.buttonName == "Shortcut button")
+        #expect(session.actionButton?.action == .spatialAudio)
+
+        session.setActionButton(.disabled)
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(device.written.last?.bytes == [1, 9, 2, 3, 0x80, 0x09, 0x0e])
+        #expect(session.actionButton?.action == .disabled)
+        #expect(session.actionButton?.supported.count == 5)
+
+        host.failures = []
+        device.failWrites = true
+        session.setActionButton(.batteryLevel)
+        #expect(session.actionButton?.action == .batteryLevel)   // shown at once
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(session.actionButton?.action == .disabled)
+        #expect(host.failures == ["change the Shortcut button"])
     }
 
     @Test func closeCancelsPendingDeviceChanges() async throws {

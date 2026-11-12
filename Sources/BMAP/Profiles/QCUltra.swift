@@ -1,12 +1,13 @@
 public extension ModelProfile {
-    /// QC Ultra Headphones gen 1, verified on fw 1.6.7.
+    /// QC Ultra Headphones gen 1, verified on fw 1.6.7. The Shortcut button
+    /// setting [1.9] is read and written on hardware.
     static let qcUltra = ModelProfile(
         id: "qc-ultra-1",
         displayName: "QC Ultra Headphones",
         productIDs: [0x4066],
         rfcommChannel: 2,
         features: [.productName, .firmware, .modelName, .battery, .eq, .autoPause, .autoAnswer,
-                   .multipoint, .modes, .pairedDevices],
+                   .multipoint, .modes, .pairedDevices, .actionButton],
         noiseControl: .modes(ModeLayout(slots: 0...9, presets: [
             ModePreset(index: 0, name: "Quiet", symbol: "waveform.slash", summary: "Full noise cancelling"),
             ModePreset(index: 1, name: "Aware", symbol: "ear", summary: "Hear your surroundings"),

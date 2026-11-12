@@ -955,12 +955,10 @@ private struct ControlsPanel: View {
                 }
             }
             if session.profile.supports(.actionButton), let button = session.actionButton {
-                ControlRow(title: "Action button", help: "What a press of the Action button does") {
-                    Picker("Action button", selection: Binding(
-                        get: { button.action }, set: { $0.map(session.setActionButton) })) {
-                        ForEach(options(button.supported, current: button.action), id: \.self) {
-                            Text($0.label).tag(Optional($0))
-                        }
+                ControlRow(title: button.buttonName, help: "What a \(button.eventName) of the \(button.buttonName) does") {
+                    Picker(button.buttonName, selection: Binding(
+                        get: { button.action }, set: { session.setActionButton($0) })) {
+                        ForEach(actionOptions(button), id: \.self) { Text($0.label).tag($0) }
                     }
                 }
             }
@@ -988,6 +986,11 @@ private struct ControlsPanel: View {
     /// Weakest to strongest, like the noise cancelling tiles.
     private func sidetoneOptions(_ state: SidetoneState) -> [SidetoneLevel] {
         options([.off, .low, .medium, .high].filter(state.supported.contains), current: state.level)
+    }
+
+    /// Actions the device can take right now; unavailable ones are left out unless current.
+    private func actionOptions(_ state: ActionButtonState) -> [ButtonAction] {
+        options(state.supported.filter { !state.unavailable.contains($0) }, current: state.action)
     }
 
     /// The supported values, plus the current one if the device reports something outside them.

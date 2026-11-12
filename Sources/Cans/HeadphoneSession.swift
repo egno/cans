@@ -208,11 +208,13 @@ final class HeadphoneSession {
         }
     }
 
+    /// Writes back the button and press the device reported; nothing to do before it's read.
     func setActionButton(_ action: ButtonAction) {
-        let previous = actionButton
-        actionButton = ActionButtonState(action: action, supported: actionButton?.supported ?? [])
+        guard let previous = actionButton else { return }
+        actionButton = previous.with(action: action)
+        let request = Request.setActionButton(action, button: previous.buttonID, event: previous.event)
         Task {
-            do { try await send(Request.setActionButton(action), failing: "change the Action button") } catch {
+            do { try await send(request, failing: "change the \(previous.buttonName)") } catch {
                 actionButton = previous
             }
         }

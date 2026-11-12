@@ -20,7 +20,9 @@ modes or noise cancelling, equalizer and a few settings, without the phone app.
 - See paired devices and switch the headphones between them
 - 3-band equalizer (treble / mid / bass, −10…+10)
 - Toggle auto-pause on removal, auto-answer calls and multipoint
-- QC35 II: self voice (sidetone), Action button, auto-off timer
+- Choose what the Action button (QC35 II) or the Shortcut button's long press (QC Ultra) does,
+  from the actions the headphones report
+- QC35 II: self voice (sidetone), auto-off timer
 - Optional voice announcement on mode change
 - Reconnects automatically: on Bluetooth connect, on wake, and with backoff
 - Launch at login
@@ -117,6 +119,11 @@ quitting never interrupts playback.
 | `31.3` | GET / START `[index, announce]` | Current mode (`ff` = unknown until set this session) |
 | `31.6` | GET `[index]` | Mode slot config: name at offset 6 (32 bytes), slots 0–9 |
 | `1.24`, `1.27` | GET / SETGET `[0/1]` | Auto-pause, auto-answer |
+| `1.9` | GET / SETGET `[0x80, 9, action]` | Shortcut button long press `[button, event, action, supported mask (4 bytes)]` |
+
+The `1.9` supported mask is a big-endian bitset over action numbers (bit 0 in the
+last byte); other models may add a 4-byte mask of currently unavailable actions.
+Writes echo the button and event the device reported.
 
 Reading the full mode list (`31.1`) requires authentication on this model, so
 slots are read one by one instead.
@@ -127,7 +134,7 @@ slots are read one by one instead.
 |---|---|---|
 | `1.6` | GET / SETGET `[level]` | Noise cancelling `[level, supported mask]`: 0 off, 1 high, 3 low |
 | `1.11` | GET / SETGET `[1, level]` | Self voice `[1, level, supported mask]` |
-| `1.9` | GET / SETGET `[0x10, 4, action]` | Action button `[button, event, action, supported mask]` |
+| `1.9` | GET / SETGET `[0x10, 4, action]` | Action button `[button, event, action, supported mask (1 byte)]` |
 | `1.4` | GET / SETGET `[minutes]` | Auto-off: 0, 5, 20, 40, 60 or 180 |
 | `1.3` | GET | Voice prompts: bit 5 on, low 5 bits language |
 

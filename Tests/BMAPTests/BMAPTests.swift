@@ -107,10 +107,43 @@ private func hex(_ s: String) -> [UInt8] {
     }
 
     @Test func actionButton() {
-        #expect(Decode.actionButton(hex("10040207"))
-                == ActionButtonState(action: .noiseCancelling, supported: [.notConfigured, .voiceAssistant, .noiseCancelling]))
-        #expect(Decode.actionButton(hex("00040207")) == nil)
-        #expect(Request.setActionButton(.voiceAssistant).bytes == [1, 9, 2, 3, 0x10, 4, 1])
+        // QC35 II: Action button, single press.
+        let qc35 = ActionButtonState(buttonID: 0x10, event: 4, action: .noiseCancelling,
+                                     supported: [.notConfigured, .voiceAssistant, .noiseCancelling])
+        #expect(Decode.actionButton(hex("10040207")) == qc35)
+        #expect(qc35.buttonName == "Action button" && qc35.eventName == "single press")
+        #expect(Decode.actionButton(hex("100402")) == nil)
+        #expect(Request.setActionButton(.voiceAssistant, button: 0x10, event: 4).bytes == [1, 9, 2, 3, 0x10, 4, 1])
+    }
+
+    @Test func shortcutButton() throws {
+        // QC Ultra gen 1: Shortcut button, long press, 4-byte big-endian mask.
+        let ultra = try #require(Decode.actionButton(hex("800913000940" + "0a")))
+        #expect(ultra == ActionButtonState(buttonID: 0x80, event: 9, action: .spatialAudio,
+                                           supported: [.voiceAssistant, .batteryLevel, .disabled, .spotifyTap, .spatialAudio]))
+        #expect(ultra.buttonName == "Shortcut button" && ultra.eventName == "long press")
+        #expect(Request.setActionButton(.disabled, button: ultra.buttonID, event: ultra.event).bytes
+                == hex("01090203" + "80090e"))
+
+        // QC Ultra gen 2.
+        #expect(Decode.actionButton(hex("80090e00094002"))
+                == ActionButtonState(buttonID: 0x80, event: 9, action: .disabled,
+                                     supported: [.voiceAssistant, .disabled, .spotifyTap, .spatialAudio]))
+
+        // NC 700: press and hold, with an unavailable mask.
+        #expect(Decode.actionButton(hex("8005030001208800000080"))
+                == ActionButtonState(buttonID: 0x80, event: 5, action: .batteryLevel,
+                                     supported: [.batteryLevel, .toggleWakeWord, .windMode, .spotifyTap],
+                                     unavailable: [.toggleWakeWord]))
+    }
+
+    @Test func unknownButtonActionsDecode() throws {
+        // Action 30 and mask bit 30 are unknown; they decode and get a generic label.
+        let state = try #require(Decode.actionButton(hex("80091e40000002")))
+        #expect(state.action.rawValue == 30)
+        #expect(state.action.label == "Action 30")
+        #expect(state.supported.map(\.rawValue) == [1, 30])
+        #expect(ButtonAction.alexa.label == "Alexa")
     }
 
     @Test func autoOff() {
@@ -149,6 +182,7 @@ private func hex(_ s: String) -> [UInt8] {
         }
         #expect(qc35.supports(.ancLevel) && qc35.supports(.pairedDevices))
         #expect(ModelProfile.qcUltra.supports(.modes) && !ModelProfile.qcUltra.supports(.ancLevel))
+        #expect(ModelProfile.qcUltra.supports(.actionButton) && qc35.supports(.actionButton))
         #expect(ModelProfile.generic().features == [.productName, .firmware, .battery, .pairedDevices])
     }
 

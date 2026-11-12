@@ -13,7 +13,7 @@ public extension Address {
     static let voicePrompts = Address(1, 3)     // QC35 II
     static let autoOff = Address(1, 4)          // QC35 II
     static let ancLevel = Address(1, 6)         // QC35 II
-    static let actionButton = Address(1, 9)     // QC35 II
+    static let actionButton = Address(1, 9)     // QC35 II, QC Ultra
     static let sidetone = Address(1, 11)        // QC35 II
     static let eq = Address(1, 7)
     static let multipoint = Address(1, 10)
@@ -61,9 +61,10 @@ public enum Request {
         setGet(.sidetone, [1, level.rawValue])
     }
 
-    /// Only the Action button's single press is configurable.
-    public static func setActionButton(_ action: ButtonAction) -> Packet {
-        setGet(.actionButton, [ActionButtonState.buttonID, ActionButtonState.singlePress, action.rawValue])
+    /// `button` and `event` must echo what the device reported (`ActionButtonState`):
+    /// each model has one configurable button and press.
+    public static func setActionButton(_ action: ButtonAction, button: UInt8, event: UInt8) -> Packet {
+        setGet(.actionButton, [button, event, action.rawValue])
     }
 
     /// `minutes` should be one of `AutoOff.choices`; others are likely rejected.
@@ -209,37 +210,111 @@ public struct SidetoneState: Equatable, Sendable {
     }
 }
 
-/// What the Action button's single press does (bosectl ACTION_MODES). Only
-/// 0-7 are listed: the supported-actions mask in [1.9] is one byte.
-public enum ButtonAction: UInt8, Sendable, CaseIterable {
-    case notConfigured = 0, voiceAssistant = 1, noiseCancelling = 2, batteryLevel = 3,
-         playPause = 4, increaseNC = 5, decreaseNC = 6, toggleWakeWord = 7
+/// What a configurable button press does (bosectl ACTION_MODES). A struct rather
+/// than an enum so actions newer firmware reports still decode and can be kept.
+public struct ButtonAction: RawRepresentable, Hashable, Sendable {
+    public let rawValue: UInt8
+    public init(rawValue: UInt8) { self.rawValue = rawValue }
 
+    public static let notConfigured = ButtonAction(rawValue: 0)
+    public static let voiceAssistant = ButtonAction(rawValue: 1)
+    public static let noiseCancelling = ButtonAction(rawValue: 2)
+    public static let batteryLevel = ButtonAction(rawValue: 3)
+    public static let playPause = ButtonAction(rawValue: 4)
+    public static let increaseNC = ButtonAction(rawValue: 5)
+    public static let decreaseNC = ButtonAction(rawValue: 6)
+    public static let toggleWakeWord = ButtonAction(rawValue: 7)
+    public static let switchDevice = ButtonAction(rawValue: 8)
+    public static let conversationMode = ButtonAction(rawValue: 9)
+    public static let nextTrack = ButtonAction(rawValue: 10)
+    public static let previousTrack = ButtonAction(rawValue: 11)
+    public static let notifications = ButtonAction(rawValue: 12)
+    public static let windMode = ButtonAction(rawValue: 13)
+    public static let disabled = ButtonAction(rawValue: 14)
+    public static let clientInteraction = ButtonAction(rawValue: 15)
+    public static let spotifyTap = ButtonAction(rawValue: 16)
+    public static let modesCarousel = ButtonAction(rawValue: 17)
+    public static let volumePresets = ButtonAction(rawValue: 18)
+    public static let spatialAudio = ButtonAction(rawValue: 19)
+    public static let lineIn = ButtonAction(rawValue: 20)
+    public static let linking = ButtonAction(rawValue: 21)
+    public static let panicLocal = ButtonAction(rawValue: 22)
+    public static let panicRemote = ButtonAction(rawValue: 23)
+    public static let panicBoth = ButtonAction(rawValue: 24)
+    public static let thirdPartyService = ButtonAction(rawValue: 25)
+    public static let smartAction = ButtonAction(rawValue: 26)
+    public static let alexa = ButtonAction(rawValue: 27)
+
+    /// By raw value.
+    private static let labels = [
+        "Nothing", "Voice Assistant", "Noise Cancelling", "Battery Level", "Play/Pause",
+        "More Noise Cancelling", "Less Noise Cancelling", "Wake Word", "Switch Device", "Conversation Mode",
+        "Next Track", "Previous Track", "Notifications", "Wind Mode", "Disabled", "App Action",
+        "Spotify Tap", "Cycle Modes", "Volume Presets", "Spatial Audio", "Line In", "Linking",
+        "Panic (Local)", "Panic (Remote)", "Panic (Both)", "Third-Party Service", "Smart Action", "Alexa",
+    ]
+
+    /// "Action 30" for an action this library doesn't know.
     public var label: String {
-        switch self {
-        case .notConfigured: "Nothing"
-        case .voiceAssistant: "Voice Assistant"
-        case .noiseCancelling: "Noise Cancelling"
-        case .batteryLevel: "Battery Level"
-        case .playPause: "Play/Pause"
-        case .increaseNC: "More Noise Cancelling"
-        case .decreaseNC: "Less Noise Cancelling"
-        case .toggleWakeWord: "Wake Word"
-        }
+        Int(rawValue) < Self.labels.count ? Self.labels[Int(rawValue)] : "Action \(rawValue)"
     }
 }
 
+/// The one configurable button press a model reports at [1.9]: the Action button's
+/// single press on a QC35 II, the Shortcut button's long press on a QC Ultra.
 public struct ActionButtonState: Equatable, Sendable {
-    /// bosectl BUTTON_IDS 16 "Action", BUTTON_EVENTS 4 "single_press".
-    static let buttonID: UInt8 = 0x10
-    static let singlePress: UInt8 = 4
-
-    public let action: ButtonAction?
+    /// bosectl BUTTON_IDS; writes must echo these two.
+    public let buttonID: UInt8
+    /// bosectl BUTTON_EVENTS.
+    public let event: UInt8
+    public let action: ButtonAction
+    /// In raw value order.
     public let supported: [ButtonAction]
+    /// Supported but not usable right now (e.g. while LE Audio is active).
+    public let unavailable: [ButtonAction]
 
-    public init(action: ButtonAction?, supported: [ButtonAction]) {
+    public init(buttonID: UInt8, event: UInt8, action: ButtonAction,
+                supported: [ButtonAction], unavailable: [ButtonAction] = []) {
+        self.buttonID = buttonID
+        self.event = event
         self.action = action
         self.supported = supported
+        self.unavailable = unavailable
+    }
+
+    public func with(action: ButtonAction) -> ActionButtonState {
+        ActionButtonState(buttonID: buttonID, event: event, action: action,
+                          supported: supported, unavailable: unavailable)
+    }
+
+    /// "Action button", "Shortcut button".
+    public var buttonName: String {
+        switch buttonID {
+        case 0x00: "Noise cancelling button"
+        case 0x02: "Voice assistant button"
+        case 0x03: "Right shortcut button"
+        case 0x04: "Left shortcut button"
+        case 0x10: "Action button"
+        case 0x80: "Shortcut button"
+        default: "Button"
+        }
+    }
+
+    /// "single press", "long press".
+    public var eventName: String {
+        switch event {
+        case 1: "press"
+        case 2: "release"
+        case 3: "short press"
+        case 4: "single press"
+        case 5: "press and hold"
+        case 6: "double press"
+        case 7: "double press and hold"
+        case 8: "triple press"
+        case 9: "long press"
+        case 10: "very long press"
+        default: "press"
+        }
     }
 }
 
@@ -357,11 +432,21 @@ public enum Decode {
                              supported: supported(p[2], in: SidetoneLevel.allCases))
     }
 
-    /// `[button 0x10, event, action, supported bitmask]`: `10 04 02 07` is ANC.
+    /// `[button, event, action, supported mask (1-4 bytes), unavailable mask (4 bytes), ...]`.
+    /// QC35 II `10 04 02 07`: Action button single press is ANC, actions 0-2 supported.
+    /// QC Ultra `80 09 13 00 09 40 0a`: Shortcut long press is spatial audio.
     public static func actionButton(_ p: [UInt8]) -> ActionButtonState? {
-        guard p.count >= 4, p[0] == ActionButtonState.buttonID else { return nil }
-        return ActionButtonState(action: ButtonAction(rawValue: p[2]),
-                                 supported: supported(p[3], in: ButtonAction.allCases))
+        guard p.count >= 4 else { return nil }
+        let unavailable = p.count > 7 ? setBits(p[7..<min(p.count, 11)]) : []
+        return ActionButtonState(buttonID: p[0], event: p[1], action: ButtonAction(rawValue: p[2]),
+                                 supported: setBits(p[3..<min(p.count, 7)]).map(ButtonAction.init),
+                                 unavailable: unavailable.map(ButtonAction.init))
+    }
+
+    /// Bit numbers set in a big-endian bitset: bit i is in the i/8-th byte from the end.
+    static func setBits(_ mask: ArraySlice<UInt8>) -> [UInt8] {
+        let bytes = Array(mask)
+        return (0..<bytes.count * 8).filter { bytes[bytes.count - 1 - $0 / 8] & (1 << ($0 % 8)) != 0 }.map(UInt8.init)
     }
 
     /// `[minutes]`; 0 means never.
