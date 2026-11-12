@@ -11,14 +11,20 @@ final class BatteryAlerts {
     static let thresholds = [20, 10]
     private static let rearmMargin = 5
 
+    /// One per pair, so two pairs' notifications don't replace each other.
+    private let identifier: String
     private var fired = Set<Int>()
 
+    init(identifier: String) {
+        self.identifier = identifier
+    }
+
     /// `UNUserNotificationCenter` traps outside an app bundle (e.g. `swift run`).
-    private var center: UNUserNotificationCenter? {
+    private static var center: UNUserNotificationCenter? {
         Bundle.main.bundleIdentifier == nil ? nil : .current()
     }
 
-    func requestAuthorization() {
+    static func requestAuthorization() {
         center?.requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
 
@@ -38,7 +44,7 @@ final class BatteryAlerts {
         content.title = "\(deviceName ?? "Headphones") battery low"
         content.body = "\(battery)% remaining"
         content.sound = .default
-        let request = UNNotificationRequest(identifier: "low-battery", content: content, trigger: nil)
-        center?.add(request)
+        let request = UNNotificationRequest(identifier: "low-battery-\(identifier)", content: content, trigger: nil)
+        Self.center?.add(request)
     }
 }

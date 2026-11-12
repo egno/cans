@@ -1,11 +1,20 @@
-/// Feature addresses and payload codecs, verified on QC Ultra Headphones gen 1
-/// (PID 0x4066, fw 1.6.7). See bose-probe/FINDINGS.md.
+/// Feature addresses and payload codecs. Unless noted, verified on QC Ultra
+/// Headphones gen 1 (PID 0x4066, fw 1.6.7); see bose-probe/FINDINGS.md. The
+/// fblock 1 settings marked QC35 II were read on a QC35 II (fw 4.8.1); their
+/// write formats come from bosectl/based-connect and are untested.
+/// Addresses are shared across Bose models; a `ModelProfile` says which exist.
 
 public extension Address {
+    static let bmapVersion = Address(0, 1)
     static let productID = Address(0, 3)
     static let firmware = Address(0, 5)
     static let modelName = Address(0, 15)
     static let productName = Address(1, 2)
+    static let voicePrompts = Address(1, 3)     // QC35 II
+    static let autoOff = Address(1, 4)          // QC35 II
+    static let ancLevel = Address(1, 6)         // QC35 II
+    static let actionButton = Address(1, 9)     // QC35 II
+    static let sidetone = Address(1, 11)        // QC35 II
     static let eq = Address(1, 7)
     static let multipoint = Address(1, 10)
     static let connectDevice = Address(4, 1)
@@ -33,8 +42,40 @@ public enum Request {
         return Packet(.eq, .setGet, [UInt8(bitPattern: clamped), band.rawValue])
     }
 
+    public static func setGet(_ address: Address, _ payload: [UInt8]) -> Packet {
+        Packet(address, .setGet, payload)
+    }
+
     public static func setToggle(_ address: Address, _ enabled: Bool) -> Packet {
-        Packet(address, .setGet, [enabled ? 1 : 0])
+        setGet(address, [enabled ? 1 : 0])
+    }
+
+    // Writes below follow bosectl/based-connect and haven't been tried on hardware.
+
+    public static func setANC(_ level: ANCLevel) -> Packet {
+        setGet(.ancLevel, [level.rawValue])
+    }
+
+    /// The leading 1 is the "enabled" byte the device reports back; level 0 turns it off.
+    public static func setSidetone(_ level: SidetoneLevel) -> Packet {
+        setGet(.sidetone, [1, level.rawValue])
+    }
+
+    /// Only the Action button's single press is configurable.
+    public static func setActionButton(_ action: ButtonAction) -> Packet {
+        setGet(.actionButton, [ActionButtonState.buttonID, ActionButtonState.singlePress, action.rawValue])
+    }
+
+    /// `minutes` should be one of `AutoOff.choices`; others are likely rejected.
+    public static func setAutoOff(minutes: UInt8) -> Packet {
+        setGet(.autoOff, [minutes])
+    }
+
+    /// based-connect writes a single `[on bit | language]` byte, without the
+    /// high bit the device reports (0xa1 reads back for on + US English).
+    /// Untested; keep it behind a hardware check before exposing it.
+    public static func setVoicePrompts(on: Bool, language: UInt8) -> Packet {
+        setGet(.voicePrompts, [(on ? VoicePrompts.onBit : 0) | (language & VoicePrompts.languageMask)])
     }
 
     /// Replies PROCESSING, then RESULT once connected. With two devices already
@@ -116,6 +157,119 @@ public struct ModeSlot: Equatable, Sendable, Identifiable {
     public var isEmpty: Bool { name.isEmpty || name == "None" }
 }
 
+/// Noise cancelling level on models without fblock 31 modes. Raw values per bosectl.
+public enum ANCLevel: UInt8, Sendable, CaseIterable {
+    case off = 0, high = 1, wind = 2, low = 3
+
+    /// Weakest to strongest, for pickers; raw values aren't in that order.
+    public static let displayOrder: [ANCLevel] = [.off, .low, .high, .wind]
+
+    public var label: String {
+        switch self {
+        case .off: "Off"
+        case .high: "High"
+        case .wind: "Wind"
+        case .low: "Low"
+        }
+    }
+}
+
+public struct ANCState: Equatable, Sendable {
+    /// Nil when the device reports a level this library doesn't know.
+    public let level: ANCLevel?
+    /// In `ANCLevel.displayOrder`.
+    public let supported: [ANCLevel]
+
+    public init(level: ANCLevel?, supported: [ANCLevel]) {
+        self.level = level
+        self.supported = supported
+    }
+}
+
+public enum SidetoneLevel: UInt8, Sendable, CaseIterable {
+    case off = 0, high = 1, medium = 2, low = 3
+
+    public var label: String {
+        switch self {
+        case .off: "Off"
+        case .high: "High"
+        case .medium: "Medium"
+        case .low: "Low"
+        }
+    }
+}
+
+public struct SidetoneState: Equatable, Sendable {
+    public let level: SidetoneLevel?
+    public let supported: [SidetoneLevel]
+
+    public init(level: SidetoneLevel?, supported: [SidetoneLevel]) {
+        self.level = level
+        self.supported = supported
+    }
+}
+
+/// What the Action button's single press does (bosectl ACTION_MODES). Only
+/// 0-7 are listed: the supported-actions mask in [1.9] is one byte.
+public enum ButtonAction: UInt8, Sendable, CaseIterable {
+    case notConfigured = 0, voiceAssistant = 1, noiseCancelling = 2, batteryLevel = 3,
+         playPause = 4, increaseNC = 5, decreaseNC = 6, toggleWakeWord = 7
+
+    public var label: String {
+        switch self {
+        case .notConfigured: "Nothing"
+        case .voiceAssistant: "Voice Assistant"
+        case .noiseCancelling: "Noise Cancelling"
+        case .batteryLevel: "Battery Level"
+        case .playPause: "Play/Pause"
+        case .increaseNC: "More Noise Cancelling"
+        case .decreaseNC: "Less Noise Cancelling"
+        case .toggleWakeWord: "Wake Word"
+        }
+    }
+}
+
+public struct ActionButtonState: Equatable, Sendable {
+    /// bosectl BUTTON_IDS 16 "Action", BUTTON_EVENTS 4 "single_press".
+    static let buttonID: UInt8 = 0x10
+    static let singlePress: UInt8 = 4
+
+    public let action: ButtonAction?
+    public let supported: [ButtonAction]
+
+    public init(action: ButtonAction?, supported: [ButtonAction]) {
+        self.action = action
+        self.supported = supported
+    }
+}
+
+public enum AutoOff {
+    /// Minutes; 0 means never.
+    public static let choices: [UInt8] = [0, 5, 20, 40, 60, 180]
+}
+
+public struct VoicePrompts: Equatable, Sendable {
+    static let onBit: UInt8 = 0x20
+    static let languageMask: UInt8 = 0x1f
+
+    public let isOn: Bool
+    /// Index into `languageNames`; 1 is US English.
+    public let language: UInt8
+    /// The whole byte 0, so a writer can preserve bits we don't understand.
+    public let raw: UInt8
+
+    public var languageName: String? {
+        Int(language) < Self.languageNames.count ? Self.languageNames[Int(language)] : nil
+    }
+
+    /// bosectl VOICE_LANGUAGES.
+    public static let languageNames = [
+        "UK English", "US English", "French", "Italian", "German", "EU Spanish", "MX Spanish",
+        "BR Portuguese", "Mandarin", "Korean", "Russian", "Polish", "Hebrew", "Turkish", "Dutch",
+        "Japanese", "Cantonese", "Arabic", "Swedish", "Danish", "Norwegian", "Finnish", "Hindi",
+    ]
+}
+
 public enum Decode {
     /// `[percent, ...]`; 0xff means unknown.
     public static func battery(_ p: [UInt8]) -> Int? {
@@ -176,5 +330,50 @@ public enum Decode {
     /// Multipoint: bit 0 is the setting (0x07 on, 0x06 off); bits 1-2 don't change with it.
     public static func multipoint(_ p: [UInt8]) -> Bool? {
         p.first.map { $0 & 0x01 != 0 }
+    }
+
+    /// `[pid hi, pid lo, variant]`: 0x40 0x20 0x01 is a QC35 II.
+    public static func productID(_ p: [UInt8]) -> UInt16? {
+        guard p.count >= 2 else { return nil }
+        return UInt16(p[0]) << 8 | UInt16(p[1])
+    }
+
+    /// Values whose bit is set in `mask`, in `order`.
+    static func supported<T: RawRepresentable<UInt8>>(_ mask: UInt8, in order: [T]) -> [T] {
+        order.filter { $0.rawValue < 8 && mask & (1 << $0.rawValue) != 0 }
+    }
+
+    /// `[level, supported bitmask]`: `01 0b` is high, with off/high/low supported.
+    public static func anc(_ p: [UInt8]) -> ANCState? {
+        guard p.count >= 2 else { return nil }
+        return ANCState(level: ANCLevel(rawValue: p[0]),
+                        supported: supported(p[1], in: ANCLevel.displayOrder))
+    }
+
+    /// `[enabled, level, supported bitmask]`: `01 00 0f` is off, all four supported.
+    public static func sidetone(_ p: [UInt8]) -> SidetoneState? {
+        guard p.count >= 3 else { return nil }
+        return SidetoneState(level: SidetoneLevel(rawValue: p[1]),
+                             supported: supported(p[2], in: SidetoneLevel.allCases))
+    }
+
+    /// `[button 0x10, event, action, supported bitmask]`: `10 04 02 07` is ANC.
+    public static func actionButton(_ p: [UInt8]) -> ActionButtonState? {
+        guard p.count >= 4, p[0] == ActionButtonState.buttonID else { return nil }
+        return ActionButtonState(action: ButtonAction(rawValue: p[2]),
+                                 supported: supported(p[3], in: ButtonAction.allCases))
+    }
+
+    /// `[minutes]`; 0 means never.
+    public static func autoOff(_ p: [UInt8]) -> Int? {
+        p.first.map(Int.init)
+    }
+
+    /// `[flags, ...]`: bit 5 on, low 5 bits language. The trailing bytes
+    /// (`00 04 cf de` on a QC35 II) are not understood.
+    public static func voicePrompts(_ p: [UInt8]) -> VoicePrompts? {
+        guard let b = p.first else { return nil }
+        return VoicePrompts(isOn: b & VoicePrompts.onBit != 0,
+                            language: b & VoicePrompts.languageMask, raw: b)
     }
 }

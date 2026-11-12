@@ -87,6 +87,98 @@ private func hex(_ s: String) -> [UInt8] {
     }
 }
 
+// MARK: - Decoders (real captures, QC35 II fw 4.8.1)
+
+@Suite struct QC35DecodeTests {
+    @Test func productID() {
+        #expect(Decode.productID(hex("402001")) == 0x4020)
+        #expect(Decode.productID([0x40]) == nil)
+    }
+
+    @Test func anc() {
+        #expect(Decode.anc(hex("010b")) == ANCState(level: .high, supported: [.off, .low, .high]))
+        #expect(Decode.anc([1]) == nil)
+        #expect(Request.setANC(.low).bytes == [1, 6, 2, 1, 3])
+    }
+
+    @Test func sidetone() {
+        #expect(Decode.sidetone(hex("01000f")) == SidetoneState(level: .off, supported: [.off, .high, .medium, .low]))
+        #expect(Request.setSidetone(.medium).bytes == [1, 11, 2, 2, 1, 2])
+    }
+
+    @Test func actionButton() {
+        #expect(Decode.actionButton(hex("10040207"))
+                == ActionButtonState(action: .noiseCancelling, supported: [.notConfigured, .voiceAssistant, .noiseCancelling]))
+        #expect(Decode.actionButton(hex("00040207")) == nil)
+        #expect(Request.setActionButton(.voiceAssistant).bytes == [1, 9, 2, 3, 0x10, 4, 1])
+    }
+
+    @Test func autoOff() {
+        #expect(Decode.autoOff([0x14]) == 20)
+        #expect(Request.setAutoOff(minutes: 60).bytes == [1, 4, 2, 1, 60])
+    }
+
+    @Test func voicePrompts() throws {
+        let vp = try #require(Decode.voicePrompts(hex("a10004cfde")))
+        #expect(vp.isOn)
+        #expect(vp.language == 1)
+        #expect(vp.languageName == "US English")
+        #expect(Decode.voicePrompts([0x81])?.isOn == false)
+        #expect(Request.setVoicePrompts(on: true, language: 1).payload == [0x21])
+    }
+}
+
+// MARK: - Profiles
+
+@Suite struct ProfileTests {
+    @Test func lookup() {
+        #expect(ModelRegistry.profile(forProductID: 0x4066).id == "qc-ultra-1")
+        #expect(ModelRegistry.profile(forProductID: 0x4020).id == "qc35-2")
+        let unknown = ModelRegistry.profile(forProductID: 0x1234, name: "Mystery")
+        #expect(unknown.id == "generic")
+        #expect(unknown.productIDs == [0x1234])
+        #expect(unknown.displayName == "Mystery")
+        #expect(ModelRegistry.profile(forProductID: 0x1234).displayName.contains("0x1234"))
+        #expect(!unknown.verified)
+    }
+
+    @Test func features() {
+        let qc35 = ModelProfile.qc35II
+        for f in [Feature.eq, .modes, .multipoint, .autoPause, .autoAnswer, .modelName] {
+            #expect(!qc35.supports(f), "QC35 II must not request \(f)")
+        }
+        #expect(qc35.supports(.ancLevel) && qc35.supports(.pairedDevices))
+        #expect(ModelProfile.qcUltra.supports(.modes) && !ModelProfile.qcUltra.supports(.ancLevel))
+        #expect(ModelProfile.generic().features == [.productName, .firmware, .battery, .pairedDevices])
+    }
+
+    @Test func noiseControl() throws {
+        guard case .modes(let layout) = ModelProfile.qcUltra.noiseControl else {
+            Issue.record("QC Ultra should use modes"); return
+        }
+        #expect(layout.slots == 0...9)
+        #expect(layout.presetCount == 3)
+        #expect(layout.preset(at: 1).symbol == "ear")
+        #expect(layout.preset(at: 5).name == nil)
+        #expect(ModelProfile.qc35II.noiseControl == .ancLevels([.off, .low, .high]))
+    }
+
+    @Test func reads() {
+        let qc35 = ModelProfile.qc35II.settingAddresses
+        #expect(qc35.first == .productName)
+        #expect(!qc35.contains(.eq) && !qc35.contains(.currentMode) && qc35.contains(.ancLevel))
+        #expect(ModelProfile.qc35II.pollAddresses == [.battery, .ancLevel])
+        #expect(ModelProfile.qcUltra.pollAddresses == [.battery, .currentMode])
+        #expect(ModelProfile.generic().settingAddresses == [.productName, .firmware, .battery])
+    }
+
+    @Test func channels() {
+        let channels = ModelRegistry.knownChannels
+        #expect(channels.contains(2) && channels.contains(8))
+        #expect(Set(channels).count == channels.count)
+    }
+}
+
 // MARK: - Client
 
 @MainActor

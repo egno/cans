@@ -21,7 +21,8 @@ public final class BMAPClient {
     private var stream = PacketStream()
     private var pending: Pending?
     private var tail: Task<Void, Never>?
-    private var isClosed = false
+    /// True once the transport closed; no more replies will come.
+    public private(set) var isClosed = false
 
     private struct Pending {
         let address: Address

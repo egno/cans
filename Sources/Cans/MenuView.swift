@@ -8,6 +8,7 @@ enum Prefs {
     static let showBatteryInMenuBar = "showBatteryInMenuBar"
     static let showEqualizer = "showEqualizer"
     static let showDevices = "showDevices"
+    static let showControls = "showControls"
 }
 
 extension View {
@@ -18,65 +19,92 @@ extension View {
 }
 
 struct MenuView: View {
-    @Bindable var headphones: Headphones
+    @Bindable var manager: HeadphonesManager
     @AppStorage(Prefs.showEqualizer) private var showEqualizer = false
     @AppStorage(Prefs.showDevices) private var showDevices = true
+    @AppStorage(Prefs.showControls) private var showControls = false
     @State private var window: NSWindow?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            DeviceCard(headphones: headphones) { SettingsMenu(headphones: headphones) }
+        VStack(alignment: .leading, spacing: Metrics.sectionSpacing) {
+            DeviceCard(manager: manager) { SettingsMenu(manager: manager) }
                 // The text column's spacer would otherwise take whatever height the window offers.
                 .fixedSize(horizontal: false, vertical: true)
-            if let error = headphones.lastError {
-                Banner(text: error) { headphones.dismissError() }
+            if let error = manager.lastError {
+                Banner(text: error) { manager.dismissError() }
             }
-            if headphones.status != .connected {
-                DisconnectedPanel(headphones: headphones)
-            } else if !headphones.isLoaded {
-                Divider()
-                HStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Reading settings…").font(.caption).foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 6)
+            if let session = manager.selected {
+                // Fresh view state per pair, so a half-done confirmation or an unsent slider
+                // position doesn't carry over to the other headphones.
+                VStack(alignment: .leading, spacing: Metrics.sectionSpacing) { sections(for: session) }
+                    .id(session.address)
             } else {
-                Divider()
-                ModesSection(headphones: headphones)
-                if !headphones.devices.isEmpty {
-                    Divider()
-                    VStack(alignment: .leading, spacing: 2) {
-                        SectionToggle(title: "Devices", detail: devicesSummary, isExpanded: $showDevices)
-                        if showDevices {
-                            DeviceList(headphones: headphones)
-                        }
-                    }
-                }
-                if !headphones.eq.isEmpty {
-                    Divider()
-                    VStack(alignment: .leading, spacing: 2) {
-                        SectionToggle(title: "Equalizer", detail: eqSummary, isExpanded: $showEqualizer)
-                        if showEqualizer {
-                            EQPanel(headphones: headphones)
-                        }
-                    }
-                }
+                DisconnectedPanel(manager: manager)
             }
         }
         .padding(14)
-        .frame(width: 320)
+        .frame(width: Metrics.width)
         .fixedSize(horizontal: false, vertical: true)
         // The menu bar window grows with its content but never shrinks, so after a section
         // collapses it's resized by hand to the content's height.
         .onGeometryChange(for: CGFloat.self, of: \.size.height) { fitWindow(toHeight: $0) }
         .background(WindowReader(window: $window))
-        .animation(.snappy(duration: 0.25), value: headphones.currentMode)
-        .animation(.snappy(duration: 0.25), value: headphones.status)
-        .animation(.snappy(duration: 0.25), value: headphones.isLoaded)
-        .animation(.snappy(duration: 0.25), value: headphones.modes)
-        .animation(.snappy(duration: 0.25), value: headphones.devices)
-        // The list changes when other devices connect, so catch up whenever the popover opens.
-        .onAppear { if headphones.status == .connected { headphones.refreshDevices() } }
+        .animation(.snappy(duration: 0.25), value: manager.selected?.address)
+        .animation(.snappy(duration: 0.25), value: manager.selected?.currentMode)
+        .animation(.snappy(duration: 0.25), value: manager.selected?.anc)
+        .animation(.snappy(duration: 0.25), value: manager.status)
+        .animation(.snappy(duration: 0.25), value: manager.selected?.isLoaded)
+        .animation(.snappy(duration: 0.25), value: manager.selected?.modes)
+        .animation(.snappy(duration: 0.25), value: manager.selected?.devices)
+        .animation(.snappy(duration: 0.25), value: manager.audio.defaultOutput)
+        .animation(.snappy(duration: 0.25), value: manager.absentPairs)
+        // The menu bar window is reused, so appear/disappear may not fire on every open;
+        // its key state does. The manager ignores repeats.
+        .onAppear { manager.popoverDidOpen() }
+        .onDisappear { manager.popoverDidClose() }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) {
+            if let window, $0.object as? NSWindow === window { manager.popoverDidOpen() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) {
+            if let window, $0.object as? NSWindow === window { manager.popoverDidClose() }
+        }
+    }
+
+    /// Only what this model supports, once it has been read.
+    @ViewBuilder private func sections(for session: HeadphoneSession) -> some View {
+        let profile = session.profile
+        if !session.isLoaded {
+            Divider()
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Reading settings…").font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, Metrics.inset)
+        } else {
+            if let layout = session.modeLayout, !session.modes.isEmpty {
+                PanelSection(title: "Modes") { ModesSection(session: session, layout: layout) }
+            }
+            if case .ancLevels(let defaults) = profile.noiseControl, profile.supports(.ancLevel), let anc = session.anc {
+                PanelSection(title: "Noise Cancelling") {
+                    NoiseCancellingSection(session: session, levels: anc.supported.isEmpty ? defaults : anc.supported)
+                }
+            }
+            if profile.supports(.pairedDevices), !session.devices.isEmpty {
+                PanelSection(title: "Devices", detail: devicesSummary(session), isExpanded: $showDevices) {
+                    DeviceList(session: session)
+                }
+            }
+            if profile.supports(.eq), !session.eq.isEmpty {
+                PanelSection(title: "Equalizer", detail: eqSummary(session), isExpanded: $showEqualizer) {
+                    EQPanel(session: session)
+                }
+            }
+            if session.hasControls {
+                PanelSection(title: "Controls", detail: controlsSummary(session), isExpanded: $showControls) {
+                    ControlsPanel(manager: manager, session: session)
+                }
+            }
+        }
     }
 
     /// Keeps the top edge where it is, under the menu bar, and moves the bottom.
@@ -91,13 +119,13 @@ struct MenuView: View {
         window.setFrame(frame, display: true)
     }
 
-    private var devicesSummary: String {
-        "\(headphones.devices.filter(\.isConnected).count) connected"
+    private func devicesSummary(_ session: HeadphoneSession) -> String {
+        "\(session.devices.filter(\.isConnected).count) connected"
     }
 
     /// "Flat", or the bands that aren't at zero: "Bass +8 · Treble −2".
-    private var eqSummary: String {
-        let changed = headphones.eq.filter { $0.value != 0 }.sorted { $0.kind.rawValue < $1.kind.rawValue }
+    private func eqSummary(_ session: HeadphoneSession) -> String {
+        let changed = session.eq.filter { $0.value != 0 }.sorted { $0.kind.rawValue < $1.kind.rawValue }
         guard !changed.isEmpty else { return "Flat" }
         return changed.map { "\($0.kind.label) \(signed($0.value))" }.joined(separator: " · ")
     }
@@ -118,54 +146,171 @@ private struct WindowReader: NSViewRepresentable {
     }
 }
 
+/// Sizes every section shares, so rows, tiles and headers line up.
+private enum Metrics {
+    /// Popover width.
+    static let width: CGFloat = 320
+    /// Gap between sections, and around their dividers.
+    static let sectionSpacing: CGFloat = 12
+    /// Text and controls sit this far in from the popover padding; rows fill it with their highlight.
+    static let inset: CGFloat = 6
+    static let rowRadius: CGFloat = 6
+    static let tileRadius: CGFloat = 8
+    /// Width of a row's leading symbol.
+    static let symbolWidth: CGFloat = 18
+    /// Gap between a row's symbol and its text.
+    static let symbolGap: CGFloat = 10
+}
+
 private func signed(_ v: Int) -> String {
     v > 0 ? "+\(v)" : v < 0 ? "−\(-v)" : "0"
 }
 
 // MARK: - Device card
 
-/// Name, mode and battery of the headphones: a compact version of progradio's now-playing card.
+/// Name, mode and battery of the shown headphones: a compact version of progradio's now-playing card.
+/// With more than one pair the name becomes a menu for switching between them.
 private struct DeviceCard<Accessory: View>: View {
-    let headphones: Headphones
+    let manager: HeadphonesManager
     @ViewBuilder let accessory: () -> Accessory
+
+    private var session: HeadphoneSession? { manager.selected }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Label(modelLabel, systemImage: headphones.status == .connected ? "headphones" : "headphones.slash")
+                Label(modelLabel, systemImage: session != nil ? "headphones" : "headphones.slash")
                     .font(.caption2.weight(.semibold))
-                    .foregroundStyle(headphones.status == .connected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                    .foregroundStyle(session != nil ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
                     .lineLimit(1)
                 Spacer(minLength: 4)
-                if headphones.status == .connected, let battery = headphones.battery {
-                    BatteryLabel(percent: battery, isLow: headphones.isBatteryLow)
+                if let session, let battery = session.battery {
+                    BatteryLabel(percent: battery, isLow: session.isBatteryLow)
                 }
                 accessory()
             }
-            Text(headphones.name ?? "Bose Headphones")
-                .font(.headline)
-                .lineLimit(1)
-            Text(statusLine)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+            if let session, manager.sessions.count > 1 || !manager.absentPairs.isEmpty {
+                PairPicker(manager: manager, selected: session)
+            } else {
+                Text(session?.displayName ?? "Bose Headphones")
+                    .font(.headline)
+                    .lineLimit(1)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(statusLine)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                if let session {
+                    Spacer(minLength: 6)
+                    MacAudioControl(manager: manager, session: session)
+                }
+            }
         }
-        .padding(.horizontal, 6)
+        .padding(.horizontal, Metrics.inset)
     }
 
     private var modelLabel: String {
-        let model = headphones.model.map { $0.replacingOccurrences(of: "Bose ", with: "") } ?? "Headphones"
+        let model = session.map { $0.modelName.replacingOccurrences(of: "Bose ", with: "") } ?? "Headphones"
         return model.uppercased()
     }
 
     private var statusLine: String {
-        switch headphones.status {
-        case .searching: return "Looking for headphones…"
-        case .unavailable: return "Not connected"
-        case .connected:
-            if let mode = headphones.currentModeSlot { return "\(mode.name) mode" }
-            // The headphones report no mode until one is set over Bluetooth this session.
-            return headphones.isLoaded ? "Mode unknown" : "Connected"
+        guard let session else {
+            return manager.status == .searching ? "Looking for headphones…" : "Not connected"
+        }
+        // QC Ultra reports no mode until one is set over Bluetooth this session.
+        return session.noiseControlSummary ?? "Connected"
+    }
+}
+
+/// The shown pair's name as a menu of every connected pair with its battery level.
+/// Pairs Cans knows but can't reach are listed too, so it's clear they weren't forgotten.
+private struct PairPicker: View {
+    let manager: HeadphonesManager
+    let selected: HeadphoneSession
+
+    var body: some View {
+        Menu {
+            Picker("Headphones", selection: Binding(
+                get: { selected.address },
+                set: { address in manager.sessions.first { $0.address == address }.map(manager.select) })) {
+                ForEach(manager.sessions, id: \.address) { session in
+                    Group {
+                        if manager.isPlayingHere(session) {
+                            Label(title(for: session), systemImage: "speaker.wave.2.fill")
+                        } else {
+                            Text(title(for: session))
+                        }
+                    }
+                    .tag(session.address)
+                }
+            }
+            .pickerStyle(.inline)
+            .labelsHidden()
+            let elsewhere = manager.sessions.filter { !manager.isPlayingHere($0) }
+            if !elsewhere.isEmpty {
+                Section("Mac Audio") {
+                    ForEach(elsewhere, id: \.address) { session in
+                        Button("Play on \(session.displayName)") { manager.playHere(session) }
+                            .disabled(!manager.canPlayHere(session))
+                            .help(manager.canPlayHere(session)
+                                  ? "Play this Mac's sound on \(session.displayName)"
+                                  : "Connect \(session.displayName) to this Mac for audio in Bluetooth settings")
+                    }
+                }
+            }
+            if !manager.absentPairs.isEmpty {
+                Section("Not Connected") {
+                    ForEach(manager.absentPairs) { pair in
+                        let connecting = manager.connectingPairs.contains(pair.address)
+                        Button("\(pair.name) · \(connecting ? "Connecting…" : "Not in reach")") {
+                            manager.connect(pair)
+                        }
+                        .disabled(connecting)
+                        .help("Connect \(pair.name)")
+                    }
+                }
+            }
+        } label: {
+            Text(selected.displayName)
+                .font(.headline)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Switch headphones")
+        .accessibilityLabel("Headphones, \(selected.displayName)")
+    }
+
+    /// "High Note · 12% (low)"
+    private func title(for session: HeadphoneSession) -> String {
+        guard let battery = session.battery else { return session.displayName }
+        return "\(session.displayName) · \(battery)%\(session.isBatteryLow ? " (low)" : "")"
+    }
+}
+
+/// Where the Mac's sound goes, for the shown pair: a speaker when it plays there, a link
+/// to send it there when the pair is connected to this Mac for audio, otherwise nothing.
+private struct MacAudioControl: View {
+    let manager: HeadphonesManager
+    let session: HeadphoneSession
+
+    var body: some View {
+        if manager.isPlayingHere(session) {
+            Image(systemName: "speaker.wave.2.fill")
+                .font(.caption)
+                .foregroundStyle(.tint)
+                .help("This Mac's sound plays on \(session.displayName)")
+                .accessibilityLabel("Mac audio plays on \(session.displayName)")
+        } else if manager.canPlayHere(session) {
+            Button { manager.playHere(session) } label: {
+                Label("Play Mac audio", systemImage: "speaker.wave.2")
+                    .labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(.link)
+            .font(.caption)
+            .help("Play this Mac's sound on \(session.displayName)")
+            .accessibilityLabel("Play Mac audio on \(session.displayName)")
         }
     }
 }
@@ -198,26 +343,76 @@ private struct BatteryLabel: View {
 
 // MARK: - Disconnected
 
-/// What to do when the headphones aren't reachable, instead of an empty popover.
+/// What to do when the headphones aren't reachable, instead of an empty popover:
+/// the pairs Cans knows, each with Connect, or a hint when it knows none.
 private struct DisconnectedPanel: View {
-    let headphones: Headphones
+    let manager: HeadphonesManager
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Turn on your headphones, or connect them to this Mac in Bluetooth settings. Cans keeps looking in the background.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 8) {
-                Button(headphones.status == .searching ? "Looking…" : "Try Now") { headphones.retryNow() }
-                    .disabled(headphones.status == .searching)
-                Button("Bluetooth Settings…") {
-                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!)
+            if manager.absentPairs.isEmpty {
+                Text("Turn on your headphones, or connect them to this Mac in Bluetooth settings. Cans keeps looking in the background.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, Metrics.inset)
+                HStack(spacing: 8) {
+                    Button(manager.status == .searching ? "Looking…" : "Try Now") { manager.retryNow() }
+                        .disabled(manager.status == .searching)
+                    bluetoothSettings
                 }
+                .controlSize(.small)
+                .padding(.horizontal, Metrics.inset)
+            } else {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(manager.absentPairs) { pair in
+                        AbsentPairRow(pair: pair, isConnecting: manager.connectingPairs.contains(pair.address)) {
+                            manager.connect(pair)
+                        }
+                    }
+                }
+                HStack {
+                    Text("Cans connects on its own when they turn on.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                    bluetoothSettings
+                        .buttonStyle(.link)
+                        .font(.caption)
+                }
+                .padding(.horizontal, Metrics.inset)
             }
-            .controlSize(.small)
         }
-        .padding(.horizontal, 6)
+    }
+
+    private var bluetoothSettings: some View {
+        Button("Bluetooth Settings…") {
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!)
+        }
+    }
+}
+
+/// A known pair that isn't connected.
+private struct AbsentPairRow: View {
+    let pair: HeadphonesManager.AbsentPair
+    let isConnecting: Bool
+    let connect: () -> Void
+
+    var body: some View {
+        ListRow(symbol: "headphones", title: pair.name, caption: isConnecting ? "Connecting…" : "Not in reach") {
+            if isConnecting {
+                ProgressView().controlSize(.small)
+            } else {
+                Button("Connect", action: connect)
+                    .controlSize(.small)
+                    .help("Ask \(pair.name) to connect to this Mac")
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(pair.name), \(isConnecting ? "connecting" : "not in reach")")
+        .accessibilityActions {
+            if !isConnecting { Button("Connect", action: connect) }
+        }
     }
 }
 
@@ -225,30 +420,44 @@ private struct DisconnectedPanel: View {
 
 /// Presets as tiles, like Control Center's listening modes; custom modes as compact rows below.
 private struct ModesSection: View {
-    let headphones: Headphones
+    let session: HeadphoneSession
+    let layout: ModeLayout
 
-    /// Slots 0-2 are Quiet, Aware and Immersion; the rest are user modes.
-    private var presets: [ModeSlot] { headphones.modes.filter { $0.index < 3 } }
-    private var custom: [ModeSlot] { headphones.modes.filter { $0.index >= 3 } }
+    /// Built-in modes take the first slots; the rest are user modes.
+    private var presets: [ModeSlot] { session.modes.filter { Int($0.index) < layout.presetCount } }
+    private var custom: [ModeSlot] { session.modes.filter { Int($0.index) >= layout.presetCount } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            SectionHeader(title: "Modes")
             if !presets.isEmpty {
                 HStack(spacing: 6) {
                     ForEach(presets) { mode in
-                        ModeTile(mode: mode, isSelected: headphones.currentMode == mode.index) {
-                            headphones.selectMode(mode.index)
+                        let preset = layout.preset(at: mode.index)
+                        ChoiceTile(title: mode.name, symbol: preset.symbol, summary: preset.summary,
+                                   isSelected: session.currentMode == mode.index) {
+                            session.selectMode(mode.index)
                         }
                     }
+                }
+                // Custom modes are rows with their own names; only presets need explaining.
+                if let mode = session.currentModeSlot, presets.contains(mode) {
+                    TileCaption(text: layout.preset(at: mode.index).summary)
                 }
             }
             if !custom.isEmpty {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(custom) { mode in
-                        ModeRow(mode: mode, isSelected: headphones.currentMode == mode.index) {
-                            headphones.selectMode(mode.index)
+                        let isSelected = session.currentMode == mode.index
+                        ListRow(symbol: layout.preset(at: mode.index).symbol, title: mode.name,
+                                isSelected: isSelected, help: isSelected ? nil : "Switch to \(mode.name)",
+                                action: { session.selectMode(mode.index) }) {
+                            if isSelected {
+                                Image(systemName: "checkmark")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.tint)
+                            }
                         }
+                        .accessibilityAddTraits(isSelected ? .isSelected : [])
                     }
                 }
             }
@@ -256,14 +465,74 @@ private struct ModesSection: View {
     }
 }
 
-private struct ModeTile: View {
-    let mode: ModeSlot
+/// Fixed noise cancelling levels, for models without modes.
+private struct NoiseCancellingSection: View {
+    let session: HeadphoneSession
+    let levels: [ANCLevel]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                ForEach(levels, id: \.self) { level in
+                    ChoiceTile(title: level.label, symbol: level.symbol, summary: level.summary,
+                               isSelected: session.anc?.level == level) {
+                        session.setANC(level)
+                    }
+                }
+            }
+            if let level = session.anc?.level {
+                TileCaption(text: level.summary)
+            }
+        }
+    }
+}
+
+/// What the selected tile does, in a line under the tiles.
+private struct TileCaption: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .padding(.horizontal, Metrics.inset)
+            .contentTransition(.opacity)
+    }
+}
+
+extension ANCLevel {
+    /// One circle filling up from Off to High, so the tiles read as a scale; Wind is
+    /// a different kind of setting and looks it.
+    var symbol: String {
+        switch self {
+        case .off: "circle.dotted"
+        case .low: "circle.lefthalf.filled"
+        case .high: "circle.fill"
+        case .wind: "wind"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .off: "Hear everything around you"
+        case .low: "Blocks some noise"
+        case .high: "Blocks the most noise"
+        case .wind: "Blocks noise and cuts wind rumble"
+        }
+    }
+}
+
+/// A large toggle tile: selected is a solid accent fill, like Control Center, so it reads as
+/// "on" with any accent colour, including Graphite.
+private struct ChoiceTile: View {
+    let title: String
+    let symbol: String
+    let summary: String
     let isSelected: Bool
     let action: () -> Void
     @State private var hovering = false
 
-    /// Selected is a solid accent fill, like Control Center, so it reads as "on" with any
-    /// accent colour, including Graphite.
     private var background: AnyShapeStyle {
         if isSelected { return AnyShapeStyle(Color.accentColor.opacity(hovering ? 0.85 : 1)) }
         return hovering ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.quinary)
@@ -272,10 +541,10 @@ private struct ModeTile: View {
     var body: some View {
         Button(action: action) {
             VStack(spacing: 4) {
-                Image(systemName: mode.symbol)
+                Image(systemName: symbol)
                     .font(.title3)
                     .frame(height: 22)
-                Text(mode.name)
+                Text(title)
                     .font(.caption)
                     .fontWeight(isSelected ? .semibold : .regular)
                     .lineLimit(1)
@@ -284,73 +553,75 @@ private struct ModeTile: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 8)
             .contentShape(Rectangle())
-            .background(RoundedRectangle(cornerRadius: 8).fill(background))
+            .background(RoundedRectangle(cornerRadius: Metrics.tileRadius).fill(background))
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .help(mode.summary)
-        .accessibilityLabel(mode.name)
-        .accessibilityHint(mode.summary)
+        .help(summary)
+        .accessibilityLabel(title)
+        .accessibilityHint(summary)
         .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 
-private struct ModeRow: View {
-    let mode: ModeSlot
-    let isSelected: Bool
-    let action: () -> Void
+/// The one row style for lists: a symbol, a title with an optional caption, and something
+/// trailing. The selected row is tinted; a row that does something lights up under the pointer.
+private struct ListRow<Trailing: View>: View {
+    let symbol: String
+    let title: String
+    var caption: String?
+    var isSelected = false
+    var help: String?
+    /// Nil when clicking does nothing: the row then isn't a button, so the pointer and
+    /// VoiceOver don't promise a click.
+    var action: (() -> Void)?
+    @ViewBuilder let trailing: () -> Trailing
     @State private var hovering = false
 
+    private var tint: AnyShapeStyle { isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary) }
+
     private var background: AnyShapeStyle {
-        if isSelected { return AnyShapeStyle(Color.accentColor.opacity(hovering ? 0.18 : 0.12)) }
-        return hovering ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear)
+        let lit = hovering && action != nil
+        if isSelected { return AnyShapeStyle(Color.accentColor.opacity(lit ? 0.18 : 0.12)) }
+        return lit ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear)
     }
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: mode.symbol)
-                    .frame(width: 18)
-                    .foregroundStyle(isSelected ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                Text(mode.name)
+        HStack(spacing: Metrics.symbolGap) {
+            if let action {
+                Button(action: action) { label }
+                    .buttonStyle(.plain)
+                    .help(ifAny: help)
+            } else {
+                label
+            }
+            trailing()
+        }
+        .padding(.vertical, 4)
+        .padding(.horizontal, Metrics.inset)
+        .background(RoundedRectangle(cornerRadius: Metrics.rowRadius).fill(background))
+        .onHover { hovering = $0 }
+    }
+
+    private var label: some View {
+        HStack(spacing: Metrics.symbolGap) {
+            Image(systemName: symbol)
+                .frame(width: Metrics.symbolWidth)
+                .foregroundStyle(tint)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
                     .fontWeight(isSelected ? .semibold : .regular)
                     .lineLimit(1)
-                Spacer()
-                if isSelected {
-                    Image(systemName: "checkmark")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.tint)
+                if let caption {
+                    Text(caption)
+                        .font(.caption)
+                        .foregroundStyle(tint)
+                        .lineLimit(1)
                 }
             }
-            .padding(.vertical, 4)
-            .padding(.horizontal, 6)
-            .contentShape(Rectangle())
-            .background(RoundedRectangle(cornerRadius: 6).fill(background))
+            Spacer(minLength: 0)
         }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-        .help(ifAny: isSelected ? nil : "Switch to \(mode.name)")
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
-    }
-}
-
-private extension ModeSlot {
-    var symbol: String {
-        switch name.lowercased() {
-        case "quiet": "waveform.slash"
-        case "aware": "ear"
-        case "immersion": "person.wave.2"
-        default: "slider.horizontal.3"
-        }
-    }
-
-    var summary: String {
-        switch name.lowercased() {
-        case "quiet": "Full noise cancelling"
-        case "aware": "Hear your surroundings"
-        case "immersion": "Spatial audio"
-        default: "Custom mode"
-        }
+        .contentShape(Rectangle())
     }
 }
 
@@ -359,54 +630,47 @@ private extension ModeSlot {
 /// Paired devices. Clicking one connects it; connected ones other than this Mac can be disconnected.
 /// When connecting would drop this Mac, and with it Cans' own link, the row asks first.
 private struct DeviceList: View {
-    let headphones: Headphones
+    let session: HeadphoneSession
     @State private var confirming: DeviceAddress?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            ForEach(headphones.devices, id: \.address) { device in
+            ForEach(session.devices, id: \.address) { device in
                 let dropped = dropped(byConnecting: device)
                 DeviceRow(
                     device: device,
-                    title: headphones.isThisMac(device) ? "This Mac" : device.name,
+                    title: session.isThisMac(device) ? "This Mac" : device.name,
                     caption: caption(for: device, dropping: dropped),
-                    pending: headphones.pendingDevices[device.address],
-                    canConnect: !device.isConnected && headphones.pendingDevices.isEmpty,
-                    canDisconnect: device.isConnected && !headphones.isThisMac(device)
-                        && headphones.pendingDevices.isEmpty,
+                    pending: session.pendingDevices[device.address],
+                    canConnect: !device.isConnected && session.pendingDevices.isEmpty,
+                    canDisconnect: device.isConnected && !session.isThisMac(device)
+                        && session.pendingDevices.isEmpty,
                     symbol: symbol(for: device),
                     confirmation: confirming == device.address ? confirmation(for: device) : nil,
                     connect: {
-                        if dropped.contains(where: headphones.isThisMac) {
+                        if dropped.contains(where: session.isThisMac) {
                             confirming = device.address
                         } else {
-                            headphones.connect(device)
+                            session.connect(device)
                         }
                     },
                     confirm: {
                         confirming = nil
-                        headphones.connect(device)
+                        session.connect(device)
                     },
                     cancel: { confirming = nil },
-                    disconnect: { headphones.disconnect(device) })
+                    disconnect: { session.disconnect(device) })
             }
-            if let multipoint = headphones.multipoint {
-                HStack {
-                    Text("Connect to two devices")
-                    Spacer()
+            if session.profile.supports(.multipoint), let multipoint = session.multipoint {
+                ControlRow(title: "Connect to two devices",
+                           help: multipoint
+                               ? "Stay connected to two devices at once; a third replaces the one not playing"
+                               : "Connecting another device disconnects the current one") {
                     Toggle("Connect to two devices", isOn: Binding(
-                        get: { multipoint }, set: { headphones.setMultipoint($0) }))
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .controlSize(.mini)
+                        get: { multipoint }, set: { session.setMultipoint($0) }))
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.top, 6)
-                .help(multipoint
-                      ? "Stay connected to two devices at once; a third replaces the one not playing"
-                      : "Connecting another device disconnects the current one")
+                .padding(.horizontal, Metrics.inset)
+                .padding(.top, 4)
             }
         }
     }
@@ -415,21 +679,21 @@ private struct DeviceList: View {
     /// isn't playing (either, if neither is); without it, whatever is connected.
     private func dropped(byConnecting device: DeviceInfo) -> [DeviceInfo] {
         guard !device.isConnected else { return [] }
-        let connected = headphones.devices.filter(\.isConnected)
-        let limit = headphones.multipoint == false ? 1 : 2
+        let connected = session.devices.filter(\.isConnected)
+        let limit = session.multipoint == false ? 1 : 2
         guard connected.count >= limit else { return [] }
         let inactive = connected.filter { !$0.isActive }
         return inactive.isEmpty ? connected : inactive
     }
 
     private func caption(for device: DeviceInfo, dropping dropped: [DeviceInfo]) -> String {
-        switch headphones.pendingDevices[device.address] {
+        switch session.pendingDevices[device.address] {
         case .connect: return "Connecting…"
         case .disconnect: return "Disconnecting…"
         case nil: break
         }
         if device.isConnected { return device.isActive ? "Active" : "Connected" }
-        let names = dropped.map(headphones.displayName(of:))
+        let names = dropped.map(session.displayName(of:))
         switch names.count {
         case 0: return "Not connected"
         case 1: return "Replaces \(names[0])"
@@ -442,7 +706,7 @@ private struct DeviceList: View {
     }
 
     private func symbol(for device: DeviceInfo) -> String {
-        if headphones.isThisMac(device) { return "laptopcomputer" }
+        if session.isThisMac(device) { return "laptopcomputer" }
         let name = device.name.lowercased()
         let words = Set(name.split { !$0.isLetter && !$0.isNumber }.map(String.init))
         let has = { (keys: [String]) in keys.contains { words.contains($0) } }
@@ -465,7 +729,7 @@ private struct DeviceRow: View {
     let device: DeviceInfo
     let title: String
     let caption: String
-    let pending: Headphones.PendingChange?
+    let pending: HeadphoneSession.PendingChange?
     let canConnect: Bool
     let canDisconnect: Bool
     let symbol: String
@@ -477,28 +741,9 @@ private struct DeviceRow: View {
     @State private var hovering = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 10) {
-                Button { if canConnect { connect() } } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: symbol)
-                            .frame(width: 18)
-                            .foregroundStyle(device.isActive ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(title)
-                                .fontWeight(device.isActive ? .semibold : .regular)
-                                .lineLimit(1)
-                            Text(caption)
-                                .font(.caption)
-                                .foregroundStyle(device.isActive ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
-                                .lineLimit(1)
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .help(ifAny: canConnect ? "Connect \(device.name)" : nil)
+        VStack(alignment: .leading, spacing: 2) {
+            ListRow(symbol: symbol, title: title, caption: caption, isSelected: device.isActive,
+                    help: "Connect \(device.name)", action: canConnect ? connect : nil) {
                 trailing
             }
             if let confirmation {
@@ -513,13 +758,11 @@ private struct DeviceRow: View {
                     }
                     .controlSize(.small)
                 }
-                .padding(.leading, 28)
+                // Under the row's text.
+                .padding(.leading, Metrics.inset + Metrics.symbolWidth + Metrics.symbolGap)
+                .padding(.bottom, 6)
             }
         }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 6)
-        .background(RoundedRectangle(cornerRadius: 6)
-            .fill(hovering && canConnect ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear)))
         .onHover { hovering = $0 }
         .contextMenu {
             if canConnect { Button("Connect", action: connect) }
@@ -541,7 +784,7 @@ private struct DeviceRow: View {
             // Always visible so it's discoverable; brighter under the pointer.
             Button(action: disconnect) {
                 Image(systemName: "xmark.circle.fill")
-                    .foregroundStyle(hovering ? AnyShapeStyle(.secondary) : AnyShapeStyle(.quaternary))
+                    .foregroundStyle(hovering ? AnyShapeStyle(.secondary) : AnyShapeStyle(.tertiary))
             }
             .buttonStyle(.plain)
             .help("Disconnect \(device.name)")
@@ -557,27 +800,27 @@ private struct DeviceRow: View {
 
 /// Treble on top, like a mixing console.
 private struct EQPanel: View {
-    let headphones: Headphones
+    let session: HeadphoneSession
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            ForEach(headphones.eq.sorted { $0.kind.rawValue > $1.kind.rawValue }) { band in
-                EQSlider(band: band, revision: headphones.eqRevision) { headphones.setEQ(band.kind, value: $0) }
+            ForEach(session.eq.sorted { $0.kind.rawValue > $1.kind.rawValue }) { band in
+                EQSlider(band: band, revision: session.eqRevision) { session.setEQ(band.kind, value: $0) }
             }
             HStack {
                 Spacer()
                 // Always laid out, so the popover doesn't change height when the EQ goes flat.
                 Button("Reset to flat") {
-                    for band in headphones.eq where band.value != 0 {
-                        headphones.setEQ(band.kind, value: 0)
+                    for band in session.eq where band.value != 0 {
+                        session.setEQ(band.kind, value: 0)
                     }
                 }
                 .buttonStyle(.link)
                 .font(.caption)
-                .disabled(headphones.eq.allSatisfy { $0.value == 0 })
+                .disabled(session.eq.allSatisfy { $0.value == 0 })
             }
         }
-        .padding(.horizontal, 6)
+        .padding(.horizontal, Metrics.inset)
     }
 }
 
@@ -676,11 +919,154 @@ private struct EQSlider: View {
     }
 }
 
+// MARK: - Controls
+
+/// Per-headphone settings, each only where the model has it. Voice prompts are shown
+/// but not yet changeable: their write format hasn't been confirmed on hardware.
+private struct ControlsPanel: View {
+    @Bindable var manager: HeadphonesManager
+    let session: HeadphoneSession
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if session.profile.supports(.autoPause), let autoPause = session.autoPause {
+                ControlRow(title: "Pause when taken off", help: "Pause playback when you take the headphones off") {
+                    Toggle("Pause when taken off", isOn: Binding(get: { autoPause }, set: { session.setAutoPause($0) }))
+                }
+            }
+            if session.profile.supports(.autoAnswer), let autoAnswer = session.autoAnswer {
+                ControlRow(title: "Answer calls when put on", help: "Answer an incoming call when you put the headphones on") {
+                    Toggle("Answer calls when put on",
+                           isOn: Binding(get: { autoAnswer }, set: { session.setAutoAnswer($0) }))
+                }
+            }
+            // Announcing is a flag on the mode switch request, kept by Cans.
+            if session.modeLayout != nil {
+                ControlRow(title: "Announce mode changes", help: "The headphones say the new mode's name when Cans switches it") {
+                    Toggle("Announce mode changes", isOn: $manager.announceModeChanges)
+                }
+            }
+            if session.profile.supports(.sidetone), let sidetone = session.sidetone {
+                ControlRow(title: "Self voice", help: "How much of your own voice you hear on calls") {
+                    Picker("Self voice", selection: Binding(
+                        get: { sidetone.level }, set: { $0.map(session.setSidetone) })) {
+                        ForEach(sidetoneOptions(sidetone), id: \.self) { Text($0.label).tag(Optional($0)) }
+                    }
+                }
+            }
+            if session.profile.supports(.actionButton), let button = session.actionButton {
+                ControlRow(title: "Action button", help: "What a press of the Action button does") {
+                    Picker("Action button", selection: Binding(
+                        get: { button.action }, set: { $0.map(session.setActionButton) })) {
+                        ForEach(options(button.supported, current: button.action), id: \.self) {
+                            Text($0.label).tag(Optional($0))
+                        }
+                    }
+                }
+            }
+            if session.profile.supports(.autoOff), let autoOff = session.autoOff {
+                ControlRow(title: "Turn off when idle", help: "Power off after this long without audio") {
+                    Picker("Turn off when idle", selection: Binding(
+                        get: { autoOff }, set: { session.setAutoOff(minutes: $0) })) {
+                        ForEach(options(AutoOff.choices.map(Int.init), current: autoOff), id: \.self) {
+                            Text(autoOffLabel(minutes: $0)).tag($0)
+                        }
+                    }
+                }
+            }
+            if session.profile.supports(.voicePrompts), let prompts = session.voicePrompts {
+                ControlRow(title: "Voice prompts", help: "Spoken announcements; can't be changed here yet") {
+                    Text(voicePromptsLabel(prompts))
+                        .foregroundStyle(.secondary)
+                        .padding(.trailing, 2)
+                }
+            }
+        }
+        .padding(.horizontal, Metrics.inset)
+    }
+
+    /// Weakest to strongest, like the noise cancelling tiles.
+    private func sidetoneOptions(_ state: SidetoneState) -> [SidetoneLevel] {
+        options([.off, .low, .medium, .high].filter(state.supported.contains), current: state.level)
+    }
+
+    /// The supported values, plus the current one if the device reports something outside them.
+    private func options<T: Equatable>(_ supported: [T], current: T?) -> [T] {
+        guard let current, !supported.contains(current) else { return supported }
+        return supported + [current]
+    }
+}
+
+/// A caption label with a compact control on the right: the label in primary, the value
+/// in secondary, so the eye lands on what each row is.
+private struct ControlRow<Control: View>: View {
+    let title: String
+    let help: String
+    @ViewBuilder let control: () -> Control
+
+    var body: some View {
+        HStack {
+            Text(title)
+            Spacer(minLength: 8)
+            control()
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .foregroundStyle(.secondary)
+                .fixedSize()
+        }
+        .font(.caption)
+        .frame(minHeight: 22)
+        .help(help)
+    }
+}
+
+/// The two most telling values for the collapsed header, from whichever settings the
+/// model has, in this order: "Self voice low · Off after 20 min", "Auto-pause on · Auto-answer off".
+@MainActor
+func controlsSummary(_ session: HeadphoneSession) -> String? {
+    let profile = session.profile
+    var parts: [String] = []
+    if profile.supports(.sidetone), let level = session.sidetone?.level {
+        parts.append("Self voice \(level.label.lowercased())")
+    }
+    if profile.supports(.autoOff), let minutes = session.autoOff {
+        parts.append(minutes == 0 ? "Stays on" : "Off after \(autoOffLabel(minutes: minutes))")
+    }
+    if profile.supports(.autoPause), let on = session.autoPause {
+        parts.append("Auto-pause \(on ? "on" : "off")")
+    }
+    if profile.supports(.autoAnswer), let on = session.autoAnswer {
+        parts.append("Auto-answer \(on ? "on" : "off")")
+    }
+    if profile.supports(.actionButton), let action = session.actionButton?.action {
+        parts.append("Button: \(action.label)")
+    }
+    return parts.isEmpty ? nil : parts.prefix(2).joined(separator: " · ")
+}
+
+/// "Never", "20 min", "1 hour", "3 hours".
+func autoOffLabel(minutes: Int) -> String {
+    switch minutes {
+    case 0: "Never"
+    case 60: "1 hour"
+    case let m where m > 60 && m % 60 == 0: "\(m / 60) hours"
+    default: "\(minutes) min"
+    }
+}
+
+/// "On · US English", or "Off".
+func voicePromptsLabel(_ prompts: VoicePrompts) -> String {
+    guard prompts.isOn else { return "Off" }
+    return prompts.languageName.map { "On · \($0)" } ?? "On"
+}
+
 // MARK: - Settings
 
-/// Set-once options and links, kept out of the way in a gear menu.
+/// Set-once app options and links, kept out of the way in a gear menu.
 private struct SettingsMenu: View {
-    @Bindable var headphones: Headphones
+    @Bindable var manager: HeadphonesManager
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @AppStorage(Prefs.showBatteryInMenuBar) private var showBatteryInMenuBar = true
 
@@ -694,29 +1080,16 @@ private struct SettingsMenu: View {
 
     var body: some View {
         Menu {
-            if headphones.status == .connected {
-                Section("Headphones") {
-                    if let autoPause = headphones.autoPause {
-                        Toggle("Pause when taken off", isOn: Binding(
-                            get: { autoPause }, set: { headphones.setAutoPause($0) }))
-                    }
-                    if let autoAnswer = headphones.autoAnswer {
-                        Toggle("Answer calls when put on", isOn: Binding(
-                            get: { autoAnswer }, set: { headphones.setAutoAnswer($0) }))
-                    }
-                    Toggle("Announce mode changes", isOn: $headphones.announceModeChanges)
-                    Button("Refresh") { headphones.refresh() }
-                }
-            }
+            // App settings only; the headphones' own are in the Controls section.
             Section("Cans") {
                 Toggle("Launch at login", isOn: Binding(get: { launchAtLogin }, set: setLaunchAtLogin))
                 Toggle("Show battery in menu bar", isOn: $showBatteryInMenuBar)
-                Toggle("Low battery alerts", isOn: $headphones.lowBatteryAlerts)
-                Toggle("Hide when disconnected", isOn: $headphones.hideWhenDisconnected)
+                Toggle("Low battery alerts", isOn: $manager.lowBatteryAlerts)
+                Toggle("Hide when disconnected", isOn: $manager.hideWhenDisconnected)
             }
             Section {
                 Text(Self.appVersion)
-                if let firmware = headphones.firmware {
+                if let firmware = manager.selected?.firmware {
                     Text("Headphones firmware \(firmware)")
                 }
                 Button("Send Feedback…") { NSWorkspace.shared.open(URL(string: "https://github.com/egno/cans/issues")!) }
@@ -741,10 +1114,10 @@ private struct SettingsMenu: View {
         do {
             if enabled { try service.register() } else { try service.unregister() }
         } catch {
-            headphones.showProblem("Couldn't turn \(enabled ? "on" : "off") launch at login: \(error.localizedDescription)")
+            manager.showProblem("Couldn't turn \(enabled ? "on" : "off") launch at login: \(error.localizedDescription)")
         }
         if service.status == .requiresApproval {
-            headphones.showProblem("Allow Cans in System Settings → General → Login Items to launch at login")
+            manager.showProblem("Allow Cans in System Settings → General → Login Items to launch at login")
             SMAppService.openSystemSettingsLoginItems()
         }
         launchAtLogin = service.status == .enabled
@@ -763,6 +1136,8 @@ private struct Banner: View {
             Label(text, systemImage: "exclamationmark.triangle.fill")
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                // Two lines may cut it off.
+                .help(text)
             Button(action: dismiss) {
                 Image(systemName: "xmark").font(.caption2.weight(.semibold))
             }
@@ -774,7 +1149,31 @@ private struct Banner: View {
         .foregroundStyle(.red)
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 6).fill(.red.opacity(0.1)))
+        .background(RoundedRectangle(cornerRadius: Metrics.rowRadius).fill(.red.opacity(0.1)))
+    }
+}
+
+/// One block of the popover: a divider, a caption header and the content. With `isExpanded`
+/// the header shows and hides the content.
+private struct PanelSection<Content: View>: View {
+    let title: String
+    var detail: String?
+    var isExpanded: Binding<Bool>?
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        Divider()
+        if let isExpanded {
+            VStack(alignment: .leading, spacing: 2) {
+                SectionToggle(title: title, detail: detail, isExpanded: isExpanded)
+                if isExpanded.wrappedValue { content() }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                SectionHeader(title: title, detail: detail)
+                content()
+            }
+        }
     }
 }
 
@@ -792,7 +1191,7 @@ private struct SectionHeader: View {
         }
         .font(.caption)
         .foregroundStyle(.secondary)
-        .padding(.horizontal, 6)
+        .padding(.horizontal, Metrics.inset)
     }
 }
 
@@ -813,7 +1212,7 @@ private struct SectionToggle: View {
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .rotationEffect(.degrees(isExpanded ? 90 : 0))
-                    .padding(.trailing, 6)
+                    .padding(.trailing, Metrics.inset)
             }
             // Taller than the caption text, so the header is easy to hit.
             .padding(.vertical, 4)

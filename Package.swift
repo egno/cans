@@ -8,5 +8,6 @@ let package = Package(
         .target(name: "BMAP"),
         .executableTarget(name: "Cans", dependencies: ["BMAP"]),
         .testTarget(name: "BMAPTests", dependencies: ["BMAP"]),
+        .testTarget(name: "CansTests", dependencies: ["Cans", "BMAP"]),
     ]
 )
