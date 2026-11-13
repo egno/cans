@@ -183,11 +183,14 @@ struct CallModeRow: View {
             let title = session.modeLayout != nil ? "Mode on calls" : "Noise cancelling on calls"
             ControlRow(title: title,
                        help: "Switch to this while an app uses this Mac's microphone and the headphones are in use, then switch back") {
-                Picker(title, selection: Binding(
-                    get: { calls.setting(for: session) }, set: { calls.set($0, for: session) })) {
-                    Text("Don't change").tag(NoiseSetting?.none)
-                    ForEach(choices(from: options)) { Text($0.name).tag(Optional($0.setting)) }
-                }
+                let choices = choices(from: options)
+                EdgePopUp(title: title,
+                          selection: Binding(get: { calls.setting(for: session) }, set: { calls.set($0, for: session) }),
+                          options: [nil] + choices.map { Optional($0.setting) },
+                          label: { setting in
+                              guard let setting else { return "Don't change" }
+                              return choices.first { $0.setting == setting }?.name ?? ""
+                          })
             }
         }
     }

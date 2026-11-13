@@ -988,28 +988,25 @@ private struct ControlsPanel: View {
             CallModeRow(session: session, calls: manager.callSwitch)
             if session.profile.supports(.sidetone), let sidetone = session.sidetone {
                 ControlRow(title: "Self voice", help: "How much of your own voice you hear on calls") {
-                    Picker("Self voice", selection: Binding(
-                        get: { sidetone.level }, set: { $0.map(session.setSidetone) })) {
-                        ForEach(sidetoneOptions(sidetone), id: \.self) { Text($0.label).tag(Optional($0)) }
-                    }
+                    EdgePopUp(title: "Self voice",
+                              selection: Binding(get: { sidetone.level }, set: { $0.map(session.setSidetone) }),
+                              options: sidetoneOptions(sidetone).map(Optional.some),
+                              label: { $0?.label ?? "" })
                 }
             }
             if session.profile.supports(.actionButton), let button = session.actionButton {
                 ControlRow(title: button.buttonName, help: "What a \(button.eventName) of the \(button.buttonName) does") {
-                    Picker(button.buttonName, selection: Binding(
-                        get: { button.action }, set: { session.setActionButton($0) })) {
-                        ForEach(actionOptions(button), id: \.self) { Text($0.label).tag($0) }
-                    }
+                    EdgePopUp(title: button.buttonName,
+                              selection: Binding(get: { button.action }, set: { session.setActionButton($0) }),
+                              options: actionOptions(button), label: \.label)
                 }
             }
             if session.profile.supports(.autoOff), let autoOff = session.autoOff {
                 ControlRow(title: "Turn off when idle", help: "Power off after this long without audio") {
-                    Picker("Turn off when idle", selection: Binding(
-                        get: { autoOff }, set: { session.setAutoOff(minutes: $0) })) {
-                        ForEach(options(AutoOff.choices.map(Int.init), current: autoOff), id: \.self) {
-                            Text(autoOffLabel(minutes: $0)).tag($0)
-                        }
-                    }
+                    EdgePopUp(title: "Turn off when idle",
+                              selection: Binding(get: { autoOff }, set: { session.setAutoOff(minutes: $0) }),
+                              options: options(AutoOff.choices.map(Int.init), current: autoOff),
+                              label: { autoOffLabel(minutes: $0) })
                 }
             }
             if session.profile.supports(.voicePrompts), !session.canChangeVoicePrompts, let prompts = session.voicePrompts {
