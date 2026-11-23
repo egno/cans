@@ -511,6 +511,13 @@ private func hex(_ s: String) -> [UInt8] {
         let channels = ModelRegistry.knownChannels
         #expect(channels.contains(2) && channels.contains(8))
         #expect(Set(channels).count == channels.count)
+        // A QC Ultra whose SDP record says channel 1: its own channel 2 goes first.
+        let ultra = ModelRegistry.candidateChannels(productID: 0x4066, sdpChannel: 1)
+        #expect(ultra.prefix(2) == [2, 1])
+        #expect(Set(ultra).count == ultra.count && ultra.contains(8))
+        // Unknown model: the SDP channel first, then the fallbacks.
+        #expect(ModelRegistry.candidateChannels(productID: nil, sdpChannel: 5).first == 5)
+        #expect(ModelRegistry.candidateChannels(productID: nil, sdpChannel: nil) == channels)
     }
 }
 

@@ -107,7 +107,7 @@ extension RFCOMMTransport: IOBluetoothRFCOMMChannelDelegate {
 /// Where a paired device offers BMAP, from its SDP records.
 ///
 /// On Bose headphones BMAP is the record with the Serial Port UUID (QC Ultra
-/// "SPPS De" on channel 2, QC35 II "SPP Dev" on channel 8). Not the
+/// "SPPS De", BMAP on channel 2; QC35 II "SPP Dev" on channel 8). Not the
 /// 00000000-deca-fade-deca-deafdecacaff record: that's iAP.
 @MainActor
 enum BMAPService {
@@ -125,8 +125,7 @@ enum BMAPService {
         // Checked before the serial port record: BMAP bytes must never reach another
         // vendor's serial port.
         if let vendor = vendorID(of: device), vendor != boseVendorID { return [] }
-        if let channel = channel(of: device) { return [channel] }
-        return ModelRegistry.knownChannels
+        return ModelRegistry.candidateChannels(productID: productID(of: device), sdpChannel: channel(of: device))
     }
 
     static func channel(of device: IOBluetoothDevice) -> UInt8? {
@@ -140,6 +139,14 @@ enum BMAPService {
     static func vendorID(of device: IOBluetoothDevice) -> Int? {
         device.getServiceRecord(for: IOBluetoothSDPUUID(uuid16: pnpInformationUUID))?
             .getAttributeDataElement(0x0201)?.getNumberValue()?.intValue
+    }
+
+    /// ProductID from the Device ID record; only meaningful when the vendor is Bose.
+    static func productID(of device: IOBluetoothDevice) -> UInt16? {
+        guard vendorID(of: device) == boseVendorID,
+              let pid = device.getServiceRecord(for: IOBluetoothSDPUUID(uuid16: pnpInformationUUID))?
+                .getAttributeDataElement(0x0202)?.getNumberValue()?.intValue else { return nil }
+        return UInt16(exactly: pid)
     }
 }
 

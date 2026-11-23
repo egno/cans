@@ -121,6 +121,17 @@ public enum ModelRegistry {
         var seen = Set<UInt8>()
         return (all.map(\.rfcommChannel) + [ModelProfile.generic().rfcommChannel]).filter { seen.insert($0).inserted }
     }
+
+    /// Channels to try, best first: the known model's own channel (from the Device ID
+    /// record's PID), then the Serial Port record's, then the other known ones. The SDP
+    /// channel alone isn't enough: macOS has reported a QC Ultra's "SPPS De" record on
+    /// channel 1 while BMAP answered only on 2.
+    public static func candidateChannels(productID: UInt16?, sdpChannel: UInt8?) -> [UInt8] {
+        let model = productID.flatMap { pid in all.first { $0.productIDs.contains(pid) } }
+        var seen = Set<UInt8>()
+        return ([model?.rfcommChannel, sdpChannel].compactMap { $0 } + knownChannels)
+            .filter { seen.insert($0).inserted }
+    }
 }
 
 public extension ModelProfile {
